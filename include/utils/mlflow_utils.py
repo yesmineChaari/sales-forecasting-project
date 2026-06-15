@@ -17,6 +17,16 @@ from .service_discovery import get_mlflow_endpoint, get_minio_endpoint
 logger = logging.getLogger(__name__)
 
 
+class JoblibPyfuncWrapper(mlflow.pyfunc.PythonModel):
+    """Minimal pyfunc wrapper around any estimator with a predict method."""
+
+    def load_context(self, context):
+        self.model = joblib.load(context.artifacts["model"])
+
+    def predict(self, context, model_input):
+        return self.model.predict(model_input)
+
+
 class MLflowManager:
     def __init__(self, config_path: str = "/usr/local/airflow/include/config/ml_config.yaml"):
         with open(config_path, 'r') as f:
@@ -73,35 +83,99 @@ class MLflowManager:
     def log_model(self, model, model_name: str, input_example: Optional[pd.DataFrame] = None,
                   signature: Optional[Any] = None, registered_model_name: Optional[str] = None):
         """
-        Log model to MLflow with compatibility for different versions.
-        Falls back to saving models as artifacts if MLflow model logging fails.
+        Log a loadable MLflow model plus the legacy pickle artifact layout.
         """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, f"{model_name}_model.pkl")
+            joblib.dump(model, model_path)
+
+            mlflow.pyfunc.log_model(
+                artifact_path=model_name,
+                python_model=JoblibPyfuncWrapper(),
+                artifacts={"model": model_path},
+                input_example=input_example,
+                signature=signature,
+                registered_model_name=registered_model_name,
+            )
+            logger.info("Successfully logged %s as MLflow pyfunc model", model_name)
+
+            # Preserve the previous artifact layout used by reports and manual debugging.
+            mlflow.log_artifact(model_path, artifact_path=f"models/{model_name}")
+
+            metadata = {
+                "model_type": model_name,
+                "framework": type(model).__module__,
+                "class": type(model).__name__,
+                "timestamp": datetime.now().isoformat(),
+                "mlflow_model_uri": f"runs:/{mlflow.active_run().info.run_id}/{model_name}",
+            }
+            metadata_path = os.path.join(tmpdir, f"{model_name}_metadata.yaml")
+            with open(metadata_path, 'w') as f:
+                yaml.dump(metadata, f)
+            mlflow.log_artifact(metadata_path, artifact_path=f"models/{model_name}")
+
+    def _model_uri_has_mlmodel(self, run_id: str, artifact_path: str) -> bool:
         try:
-            # Save model to a temporary file first
-            import tempfile
-            with tempfile.TemporaryDirectory() as tmpdir:
-                model_path = os.path.join(tmpdir, f"{model_name}_model.pkl")
-                joblib.dump(model, model_path)
-                
-                # Log as artifact
-                mlflow.log_artifact(model_path, artifact_path=f"models/{model_name}")
-                logger.info(f"Successfully saved {model_name} model as artifact")
-                
-                # Also save metadata
-                metadata = {
-                    "model_type": model_name,
-                    "framework": type(model).__module__,
-                    "class": type(model).__name__,
-                    "timestamp": datetime.now().isoformat()
-                }
-                metadata_path = os.path.join(tmpdir, f"{model_name}_metadata.yaml")
-                with open(metadata_path, 'w') as f:
-                    yaml.dump(metadata, f)
-                mlflow.log_artifact(metadata_path, artifact_path=f"models/{model_name}")
-                
+            local_path = mlflow.artifacts.download_artifacts(
+                run_id=run_id,
+                artifact_path=artifact_path,
+            )
+        except Exception:
+            return False
+
+        return os.path.exists(os.path.join(local_path, "MLmodel"))
+
+    def _resolve_model_uri(self, run_id: str, artifact_path: str) -> str:
+        candidates = []
+        if artifact_path:
+            candidates.append(artifact_path.strip("/"))
+
+        if artifact_path.startswith("models/"):
+            candidates.append(artifact_path.split("/", 1)[1].strip("/"))
+        else:
+            candidates.append(f"models/{artifact_path.strip('/')}")
+
+        for candidate in dict.fromkeys(candidates):
+            if self._model_uri_has_mlmodel(run_id, candidate):
+                return f"runs:/{run_id}/{candidate}"
+
+        raise ValueError(
+            f"No loadable MLflow model found for run {run_id} at any of: "
+            f"{', '.join(dict.fromkeys(candidates))}"
+        )
+
+    def _legacy_pickle_artifact_path(self, artifact_path: str) -> str:
+        artifact_path = artifact_path.strip("/")
+        model_name = artifact_path.split("/")[-1]
+        if artifact_path.startswith("models/"):
+            return f"{artifact_path}/{model_name}_model.pkl"
+        return f"models/{artifact_path}/{model_name}_model.pkl"
+
+    def _load_legacy_pickle_model(self, run_id: str, artifact_path: str):
+        local_path = mlflow.artifacts.download_artifacts(
+            run_id=run_id,
+            artifact_path=self._legacy_pickle_artifact_path(artifact_path),
+        )
+        return joblib.load(local_path)
+
+    def _registered_model_name(self, model_name: str) -> str:
+        return f"{self.registry_name}_{model_name}"
+
+    def _is_run_id_version_fallback(self, version: str) -> bool:
+        try:
+            int(str(version))
+            return False
+        except ValueError:
+            return True
+
+    def _create_registered_model_if_needed(self, registered_name: str):
+        try:
+            self.client.create_registered_model(registered_name)
         except Exception as e:
-            logger.error(f"Failed to log model {model_name}: {e}")
-            # Don't fail the entire run, just log the error
+            if "already exists" not in str(e).lower():
+                logger.debug("Registered model creation skipped for %s: %s", registered_name, e)
     
     def log_artifacts(self, artifact_path: str):
         mlflow.log_artifacts(artifact_path)
@@ -153,46 +227,130 @@ class MLflowManager:
         """Load model from MLflow or from artifacts"""
         try:
             return mlflow.pyfunc.load_model(model_uri)
-        except:
+        except Exception:
             # Try loading from artifacts
             if "runs:/" in model_uri:
                 run_id = model_uri.split("/")[1]
                 artifact_path = "/".join(model_uri.split("/")[2:])
-                local_path = mlflow.artifacts.download_artifacts(
-                    run_id=run_id, 
-                    artifact_path=f"{artifact_path}_model.pkl"
-                )
-                return joblib.load(local_path)
-            else:
-                raise ValueError(f"Cannot load model from {model_uri}")
+                return self._load_legacy_pickle_model(run_id, artifact_path)
+
+            raise ValueError(f"Cannot load model from {model_uri}")
     
     def register_model(self, run_id: str, model_name: str, artifact_path: str) -> str:
-        """Register model if possible, otherwise return run_id as version"""
+        """Register the loadable MLflow model artifact and return its real version."""
         try:
-            model_uri = f"runs:/{run_id}/{artifact_path}"
-            model_version = mlflow.register_model(model_uri, f"{self.registry_name}_{model_name}")
+            model_uri = self._resolve_model_uri(run_id, artifact_path)
+            registered_name = self._registered_model_name(model_name)
+            self._create_registered_model_if_needed(registered_name)
+            model_version = mlflow.register_model(model_uri, registered_name)
+            logger.info(
+                "Registered model %s from %s as version %s",
+                registered_name,
+                model_uri,
+                model_version.version,
+            )
             return model_version.version
-        except:
-            logger.warning(f"Model registration not available, using run_id as version")
-            return run_id
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to register {model_name} from run {run_id}: {e}"
+            ) from e
     
     def transition_model_stage(self, model_name: str, version: str, stage: str):
+        if self._is_run_id_version_fallback(version):
+            raise ValueError(
+                f"Refusing to transition {model_name}: {version} is not an MLflow model version"
+            )
+
+        registered_name = self._registered_model_name(model_name)
+        stage_error = None
+        stage_set = False
+
         try:
             self.client.transition_model_version_stage(
-                name=f"{self.registry_name}_{model_name}",
+                name=registered_name,
                 version=version,
-                stage=stage
+                stage=stage,
+                archive_existing_versions=True,
             )
-        except:
-            logger.warning(f"Model stage transition not available")
+        except Exception as e:
+            stage_error = e
+            logger.warning(
+                "Model stage transition failed for %s version %s: %s",
+                registered_name,
+                version,
+                e,
+            )
+
+        try:
+            model_version = self.client.get_model_version(registered_name, str(version))
+            stage_set = getattr(model_version, "current_stage", None) == stage
+        except Exception as e:
+            logger.debug("Could not verify model stage for %s version %s: %s", registered_name, version, e)
+
+        alias_set = False
+        alias_error = None
+        if hasattr(self.client, "set_registered_model_alias"):
+            try:
+                self.client.set_registered_model_alias(registered_name, stage, str(version))
+                alias_set = True
+            except Exception as e:
+                alias_error = e
+                logger.warning(
+                    "Model alias assignment failed for %s version %s alias %s: %s",
+                    registered_name,
+                    version,
+                    stage,
+                    e,
+                )
+
+        if stage_set or alias_set:
+            logger.info(
+                "Marked %s version %s as %s%s",
+                registered_name,
+                version,
+                stage,
+                " using alias fallback" if alias_set and not stage_set else "",
+            )
+            return
+
+        if stage_error:
+            raise RuntimeError(
+                f"Failed to transition {model_name} version {version} to {stage}: {stage_error}"
+            ) from stage_error
+
+        raise RuntimeError(
+            f"Failed to mark {model_name} version {version} as {stage}"
+            + (f": {alias_error}" if alias_error else "")
+        )
     
     def get_latest_model_version(self, model_name: str, stage: Optional[str] = None) -> Dict[str, Any]:
         try:
-            filter_string = f"name='{self.registry_name}_{model_name}'"
+            registered_name = self._registered_model_name(model_name)
+            filter_string = f"name='{registered_name}'"
+            versions = list(self.client.search_model_versions(filter_string))
+
             if stage:
-                filter_string += f" AND current_stage='{stage}'"
-            
-            versions = self.client.search_model_versions(filter_string)
+                staged_versions = [
+                    version
+                    for version in versions
+                    if getattr(version, "current_stage", None) == stage
+                ]
+                if staged_versions:
+                    versions = staged_versions
+                elif hasattr(self.client, "get_model_version_by_alias"):
+                    alias_version = self.client.get_model_version_by_alias(
+                        registered_name,
+                        stage,
+                    )
+                    return {
+                        "version": alias_version.version,
+                        "stage": stage,
+                        "run_id": alias_version.run_id,
+                        "source": alias_version.source,
+                    }
+                else:
+                    versions = []
+
             if not versions:
                 raise ValueError(f"No model versions found for {model_name}")
             

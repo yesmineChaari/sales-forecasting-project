@@ -1,5 +1,6 @@
 """
-Ensemble Model for combining predictions from multiple models
+Standalone Ensemble Model for Streamlit UI
+This version has no external dependencies on the ml_models package
 """
 import numpy as np
 from typing import Dict, Any, List
