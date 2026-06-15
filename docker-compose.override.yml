@@ -28,6 +28,7 @@ services:
   # PostgreSQL for MLflow
   mlflow-db:
     image: postgres:16-alpine
+    platform: linux/amd64
     environment:
       POSTGRES_USER: mlflow
       POSTGRES_PASSWORD: mlflow
@@ -44,6 +45,7 @@ services:
   # MinIO for S3-compatible storage
   minio:
     image: minio/minio:latest
+    platform: linux/amd64
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -64,6 +66,7 @@ services:
   # Create MLflow bucket in MinIO
   minio-mc:
     image: minio/mc:latest
+    platform: linux/amd64
 
     depends_on:
       - minio
@@ -79,6 +82,7 @@ services:
   # Add Redis to the Airflow network for Celery if needed
   redis:
     image: redis:7-alpine
+    platform: linux/amd64
 
     expose:
       - 6379
@@ -92,7 +96,7 @@ services:
   # Streamlit UI for model inference
   streamlit-ui:
     image: python:3.11-slim
-    platform: linux/arm64
+    platform: linux/amd64
     working_dir: /app
     command: >
       bash -c "
