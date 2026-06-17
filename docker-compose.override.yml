@@ -23,6 +23,9 @@ services:
       - mlflow-db
       - minio
 
+    networks:
+      - airflow
+
     restart: unless-stopped
 
   # PostgreSQL for MLflow
@@ -39,6 +42,9 @@ services:
       test: ['CMD', 'pg_isready', '-U', 'mlflow']
       interval: 5s
       retries: 5
+
+    networks:
+      - airflow
 
     restart: unless-stopped
 
@@ -61,6 +67,9 @@ services:
       timeout: 20s
       retries: 3
 
+    networks:
+      - airflow
+
     restart: unless-stopped
 
   # Create MLflow bucket in MinIO
@@ -70,6 +79,8 @@ services:
 
     depends_on:
       - minio
+    networks:
+      - airflow
     entrypoint: >
       /bin/sh -c "
       sleep 10;
@@ -91,6 +102,8 @@ services:
       interval: 5s
       timeout: 30s
       retries: 50
+    networks:
+      - airflow
     restart: unless-stopped
 
   # Streamlit UI for model inference
@@ -119,7 +132,12 @@ services:
     depends_on:
       - mlflow
       - minio
+    networks:
+      - airflow
     restart: unless-stopped
+
+networks:
+  airflow:
 
 volumes:
   mlflow-db-volume:

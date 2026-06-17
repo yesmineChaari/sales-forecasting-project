@@ -141,14 +141,20 @@ class SimplePredictor:
                 # If we have encoders, use them
                 if self.model_loader.encoders and 'store_id' in self.model_loader.encoders:
                     try:
-                        # Transform store_id
                         encoder = self.model_loader.encoders['store_id']
-                        # Handle unknown categories
-                        known_stores = list(encoder.classes_)
-                        future_df['store_id'] = future_df['store_id'].apply(
-                            lambda x: x if x in known_stores else known_stores[0]
-                        )
-                        encoded_stores = encoder.transform(future_df['store_id'])
+                        if hasattr(encoder, "categories_"):
+                            encoded_stores = encoder.transform(
+                                future_df[['store_id']].astype(str)
+                            ).ravel()
+                        elif hasattr(encoder, "classes_"):
+                            class_map = {value: idx for idx, value in enumerate(encoder.classes_)}
+                            encoded_stores = (
+                                future_df['store_id'].astype(str).map(class_map).fillna(-1).values
+                            )
+                        else:
+                            encoded_stores = encoder.transform(
+                                future_df[['store_id']].astype(str)
+                            ).ravel()
                         future_df['store_id'] = encoded_stores
                     except Exception as e:
                         logger.warning(f"Error encoding store_id: {e}")
@@ -158,7 +164,7 @@ class SimplePredictor:
                     # No encoder, convert to numeric
                     # Extract numeric part if format is "store_XXX"
                     if future_df['store_id'].str.contains('store_').any():
-                        future_df['store_id'] = future_df['store_id'].str.extract('(\d+)').astype(int)
+                        future_df['store_id'] = future_df['store_id'].str.extract(r'(\d+)').astype(int)
                     else:
                         future_df['store_id'] = 1
             

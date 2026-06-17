@@ -91,15 +91,32 @@ class MLflowManager:
             model_path = os.path.join(tmpdir, f"{model_name}_model.pkl")
             joblib.dump(model, model_path)
 
-            mlflow.pyfunc.log_model(
-                artifact_path=model_name,
-                python_model=JoblibPyfuncWrapper(),
-                artifacts={"model": model_path},
-                input_example=input_example,
-                signature=signature,
-                registered_model_name=registered_model_name,
-            )
-            logger.info("Successfully logged %s as MLflow pyfunc model", model_name)
+            mlflow_model_path = os.path.join(tmpdir, model_name)
+            if model_name == "xgboost":
+                mlflow.xgboost.save_model(
+                    model,
+                    path=mlflow_model_path,
+                    input_example=input_example,
+                    signature=signature,
+                )
+            elif model_name == "lightgbm":
+                mlflow.lightgbm.save_model(
+                    model,
+                    path=mlflow_model_path,
+                    input_example=input_example,
+                    signature=signature,
+                )
+            else:
+                mlflow.pyfunc.save_model(
+                    path=mlflow_model_path,
+                    python_model=JoblibPyfuncWrapper(),
+                    artifacts={"model": model_path},
+                    input_example=input_example,
+                    signature=signature,
+                )
+
+            mlflow.log_artifacts(mlflow_model_path, artifact_path=model_name)
+            logger.info("Successfully logged %s as MLflow model artifacts", model_name)
 
             # Preserve the previous artifact layout used by reports and manual debugging.
             mlflow.log_artifact(model_path, artifact_path=f"models/{model_name}")

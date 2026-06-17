@@ -114,12 +114,21 @@ class ModelInferenceService:
         )
         
         # Select only the features used during training
-        X = df_features[self.feature_cols]
+        X = df_features[self.feature_cols].copy()
         
         # Encode categorical variables
-        for col in X.select_dtypes(include=['object']).columns:
+        for col in X.select_dtypes(include=['object', 'category']).columns:
             if col in self.encoders:
-                X[col] = self.encoders[col].transform(X[col].astype(str))
+                encoder = self.encoders[col]
+                values = X[[col]].astype(str)
+
+                if hasattr(encoder, "categories_"):
+                    X.loc[:, col] = encoder.transform(values).ravel()
+                elif hasattr(encoder, "classes_"):
+                    class_map = {value: idx for idx, value in enumerate(encoder.classes_)}
+                    X.loc[:, col] = X[col].astype(str).map(class_map).fillna(-1)
+                else:
+                    X.loc[:, col] = encoder.transform(values).ravel()
         
         # Scale features
         X_scaled = self.scalers['standard'].transform(X)

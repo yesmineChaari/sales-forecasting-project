@@ -8,7 +8,7 @@ from datetime import datetime
 
 from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -105,17 +105,40 @@ class ModelTrainer:
         y_val = val_df[target_col].values
         y_test = test_df[target_col].values
         
-        # Encode categorical variables
-        categorical_cols = X_train.select_dtypes(include=['object']).columns
+        # Encode categorical variables. Validation/test may contain store/category
+        # combinations that are absent from the chronological training split.
+        categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
         for col in categorical_cols:
             if col not in self.encoders:
-                self.encoders[col] = LabelEncoder()
-                X_train.loc[:, col] = self.encoders[col].fit_transform(X_train[col].astype(str))
+                self.encoders[col] = OrdinalEncoder(
+                    handle_unknown='use_encoded_value',
+                    unknown_value=-1,
+                )
+                X_train.loc[:, col] = self.encoders[col].fit_transform(
+                    X_train[[col]].astype(str)
+                ).ravel()
             else:
-                X_train.loc[:, col] = self.encoders[col].transform(X_train[col].astype(str))
+                X_train.loc[:, col] = self.encoders[col].transform(
+                    X_train[[col]].astype(str)
+                ).ravel()
+
+            known_categories = set(self.encoders[col].categories_[0])
+            val_unknowns = (~X_val[col].astype(str).isin(known_categories)).sum()
+            test_unknowns = (~X_test[col].astype(str).isin(known_categories)).sum()
+            if val_unknowns or test_unknowns:
+                logger.info(
+                    "Encoding unseen categories in %s as -1 (val=%s, test=%s)",
+                    col,
+                    val_unknowns,
+                    test_unknowns,
+                )
             
-            X_val.loc[:, col] = self.encoders[col].transform(X_val[col].astype(str))
-            X_test.loc[:, col] = self.encoders[col].transform(X_test[col].astype(str))
+            X_val.loc[:, col] = self.encoders[col].transform(
+                X_val[[col]].astype(str)
+            ).ravel()
+            X_test.loc[:, col] = self.encoders[col].transform(
+                X_test[[col]].astype(str)
+            ).ravel()
         
         # Scale numerical features
         scaler = StandardScaler()
