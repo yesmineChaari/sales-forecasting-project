@@ -164,7 +164,14 @@ class ModelVisualizer:
         box_data = [residuals for residuals in residuals_data.values()]
         box_colors = [self.colors.get(model.lower(), '#95A5A6') for model in residuals_data.keys()]
         
-        bp = ax1.boxplot(box_data, labels=list(residuals_data.keys()), patch_artist=True)
+        try:
+            bp = ax1.boxplot(
+                box_data,
+                tick_labels=list(residuals_data.keys()),
+                patch_artist=True,
+            )
+        except TypeError:
+            bp = ax1.boxplot(box_data, labels=list(residuals_data.keys()), patch_artist=True)
         for patch, color in zip(bp['boxes'], box_colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)

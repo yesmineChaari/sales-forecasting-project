@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import yaml
 import joblib
 import logging
+import os
 from datetime import datetime
 
 from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
@@ -157,11 +158,19 @@ class ModelTrainer:
         return X_train_scaled, X_val_scaled, X_test_scaled, y_train, y_val, y_test
     
     def calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+        nonzero_mask = y_true != 0
+        if nonzero_mask.any():
+            mape = np.mean(
+                np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask]) / y_true[nonzero_mask])
+            ) * 100
+        else:
+            mape = 0.0
+
         metrics = {
-            'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
-            'mae': mean_absolute_error(y_true, y_pred),
-            'mape': np.mean(np.abs((y_true - y_pred) / y_true)) * 100,
-            'r2': r2_score(y_true, y_pred)
+            'rmse': float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            'mae': float(mean_absolute_error(y_true, y_pred)),
+            'mape': float(mape),
+            'r2': float(r2_score(y_true, y_pred))
         }
         return metrics
     
@@ -267,16 +276,19 @@ class ModelTrainer:
         
         logger.info("Training Prophet model")
         
-        # Prepare data for Prophet
+        # Prepare store-day rows for Prophet. This keeps Prophet on the same
+        # target grain as XGBoost and LightGBM.
         prophet_train = train_df[[date_col, target_col]].rename(
             columns={date_col: 'ds', target_col: 'y'}
         )
-        
-        # Remove any NaN values
+
         prophet_train = prophet_train.dropna()
-        
-        # Ensure dates are sorted
         prophet_train = prophet_train.sort_values('ds')
+
+        if len(prophet_train) < 2:
+            raise ValueError("Prophet requires at least two observations")
+
+        logger.info("Prophet training rows: %s", len(prophet_train))
         
         # Initialize Prophet with simplified parameters to avoid memory issues
         prophet_params = self.model_config['prophet']['params'].copy()
@@ -285,27 +297,34 @@ class ModelTrainer:
         prophet_params.update({
             'stan_backend': 'CMDSTANPY',  # Use cmdstanpy backend
             'mcmc_samples': 0,  # Disable MCMC for speed and stability
-            'uncertainty_samples': 100,  # Reduce uncertainty samples
+            'uncertainty_samples': 0,  # Keep DAG training deterministic and fast
         })
         
         try:
             model = Prophet(**prophet_params)
-            
-            # Add only essential regressors to reduce complexity
+
+            # Add only essential numeric regressors to keep Prophet aligned with
+            # store-day features without making the fit too complex.
             numeric_cols = train_df.select_dtypes(include=[np.number]).columns
-            regressor_cols = [col for col in numeric_cols if col not in [target_col, 'year', 'month', 'day', 'week', 'quarter']]
-            
-            # Limit to top 5 most important regressors based on variance
+            regressor_cols = [
+                col
+                for col in numeric_cols
+                if col not in [target_col, 'year', 'month', 'day', 'week', 'quarter']
+            ]
+
             if len(regressor_cols) > 5:
                 variances = {col: train_df[col].var() for col in regressor_cols}
-                regressor_cols = sorted(variances.keys(), key=lambda x: variances[x], reverse=True)[:5]
-            
+                regressor_cols = sorted(
+                    variances.keys(),
+                    key=lambda x: variances[x],
+                    reverse=True,
+                )[:5]
+
             for col in regressor_cols:
-                if train_df[col].std() > 0:  # Only add regressors with variance
+                if train_df[col].std() > 0:
                     model.add_regressor(col)
-                    prophet_train[col] = train_df[col]
-            
-            # Fit the model with error handling
+                    prophet_train[col] = train_df.loc[prophet_train.index, col]
+
             model.fit(prophet_train)
             
             self.models['prophet'] = model
@@ -322,7 +341,7 @@ class ModelTrainer:
                 daily_seasonality=False,
                 changepoint_prior_scale=0.05,
                 seasonality_prior_scale=10.0,
-                uncertainty_samples=50,
+                uncertainty_samples=0,
                 mcmc_samples=0
             )
             
@@ -428,62 +447,56 @@ class ModelTrainer:
                     prophet_metrics = self.calculate_metrics(y_test, prophet_pred)
                     
                     self.mlflow_manager.log_metrics({f"prophet_{k}": v for k, v in prophet_metrics.items()})
+                    self.mlflow_manager.log_model(
+                        prophet_model,
+                        "prophet",
+                        input_example=future.iloc[:5],
+                    )
                     
                     results['prophet'] = {
                         'model': prophet_model,
                         'metrics': prophet_metrics,
                         'predictions': prophet_pred
                     }
-                    
-                    # Ensemble predictions with all three models
-                    ensemble_pred = (xgb_pred + lgb_pred + prophet_pred) / 3
                 except Exception as e:
-                    logger.warning(f"Prophet training failed: {e}. Using weighted ensemble of XGBoost and LightGBM.")
-                    prophet_enabled = False
-            
-            if not prophet_enabled:
-                # Weighted ensemble based on individual model performance (using validation R2)
-                xgb_val_pred = xgb_model.predict(X_val)
-                lgb_val_pred = lgb_model.predict(X_val)
-                
-                xgb_val_r2 = r2_score(y_val, xgb_val_pred)
-                lgb_val_r2 = r2_score(y_val, lgb_val_pred)
-                
-                # Calculate weights based on R2 scores with minimum weight constraint
-                # This prevents a poorly performing model from being completely ignored
-                min_weight = 0.2
-                xgb_weight = max(min_weight, xgb_val_r2 / (xgb_val_r2 + lgb_val_r2))
-                lgb_weight = max(min_weight, lgb_val_r2 / (xgb_val_r2 + lgb_val_r2))
-                
-                # Normalize weights
-                total_weight = xgb_weight + lgb_weight
-                xgb_weight = xgb_weight / total_weight
-                lgb_weight = lgb_weight / total_weight
-                
-                logger.info(f"Ensemble weights - XGBoost: {xgb_weight:.3f}, LightGBM: {lgb_weight:.3f}")
-                
-                # Create ensemble model
-                ensemble_weights = {
-                    'xgboost': xgb_weight,
-                    'lightgbm': lgb_weight
-                }
-                
-                # Use simple weighted ensemble based on validation performance
-                ensemble_pred = xgb_weight * xgb_pred + lgb_weight * lgb_pred
+                    raise RuntimeError("Prophet is enabled but training failed") from e
+
+            # Weighted ensemble based on validation R2. Prophet is logged as a
+            # separate model because it expects a date dataframe, while this
+            # ensemble predicts from engineered feature matrices.
+            xgb_val_pred = xgb_model.predict(X_val)
+            lgb_val_pred = lgb_model.predict(X_val)
+
+            xgb_val_r2 = r2_score(y_val, xgb_val_pred)
+            lgb_val_r2 = r2_score(y_val, lgb_val_pred)
+
+            min_weight = 0.2
+            denominator = xgb_val_r2 + lgb_val_r2
+            if denominator <= 0:
+                xgb_weight = 0.5
+                lgb_weight = 0.5
+            else:
+                xgb_weight = max(min_weight, xgb_val_r2 / denominator)
+                lgb_weight = max(min_weight, lgb_val_r2 / denominator)
+
+            total_weight = xgb_weight + lgb_weight
+            xgb_weight = xgb_weight / total_weight
+            lgb_weight = lgb_weight / total_weight
+
+            logger.info(f"Ensemble weights - XGBoost: {xgb_weight:.3f}, LightGBM: {lgb_weight:.3f}")
+
+            ensemble_weights = {
+                'xgboost': xgb_weight,
+                'lightgbm': lgb_weight
+            }
+
+            ensemble_pred = xgb_weight * xgb_pred + lgb_weight * lgb_pred
             
             # Create the ensemble model object
             ensemble_models = {
                 'xgboost': xgb_model,
                 'lightgbm': lgb_model
             }
-            
-            if 'prophet' in results:
-                ensemble_models['prophet'] = results['prophet']['model']
-                ensemble_weights = {
-                    'xgboost': 1/3,
-                    'lightgbm': 1/3,
-                    'prophet': 1/3
-                }
             
             ensemble_model = EnsembleModel(ensemble_models, ensemble_weights)
             
@@ -518,51 +531,60 @@ class ModelTrainer:
             for rec in diagnosis['recommendations']:
                 logger.warning(f"- {rec}")
             
-            # Generate visualizations
-            logger.info("Generating model comparison visualizations...")
-            try:
-                self._generate_and_log_visualizations(results, test_df, target_col)
-            except Exception as viz_error:
-                logger.error(f"Visualization generation failed: {viz_error}", exc_info=True)
+            visualizations_logged = False
+            if os.getenv("ENABLE_MODEL_VISUALIZATIONS", "false").lower() == "true":
+                logger.info("Generating model comparison visualizations...")
+                try:
+                    visualizations_logged = self._generate_and_log_visualizations(results, test_df, target_col)
+                except Exception as viz_error:
+                    logger.error(f"Visualization generation failed: {viz_error}", exc_info=True)
+            else:
+                logger.info(
+                    "Skipping model comparison visualizations; "
+                    "set ENABLE_MODEL_VISUALIZATIONS=true to enable them"
+                )
             
             # Save artifacts
             self.save_artifacts()
-            
-            # Get current run ID for verification
+
+            # Get current run ID for verification before closing the run.
             current_run_id = mlflow.active_run().info.run_id
-            
-            self.mlflow_manager.end_run()
-            
-            # Sync artifacts to S3
-            from utils.mlflow_s3_utils import MLflowS3Manager
-            
-            logger.info("Syncing artifacts to S3...")
-            try:
-                s3_manager = MLflowS3Manager()
-                s3_manager.sync_mlflow_artifacts_to_s3(current_run_id)
-                logger.info("✓ Successfully synced artifacts to S3")
-                
-                # Verify S3 artifacts after sync
-                from utils.s3_verification import verify_s3_artifacts, log_s3_verification_results
-                
-                logger.info("Verifying S3 artifact storage...")
-                verification_results = verify_s3_artifacts(
-                    run_id=current_run_id,
-                    expected_artifacts=[
-                        'models/', 
-                        'scalers.pkl', 
-                        'encoders.pkl', 
-                        'feature_cols.pkl',
-                        'visualizations/',
-                        'reports/'
-                    ]
+
+            from utils.s3_verification import verify_s3_artifacts, log_s3_verification_results
+
+            expected_artifacts = [
+                'xgboost/MLmodel',
+                'lightgbm/MLmodel',
+                'ensemble/MLmodel',
+                'models/xgboost/',
+                'models/lightgbm/',
+                'models/ensemble/',
+                'scalers.pkl',
+                'encoders.pkl',
+                'feature_cols.pkl',
+            ]
+            if 'prophet' in results:
+                expected_artifacts.extend(['prophet/MLmodel', 'models/prophet/'])
+            if visualizations_logged:
+                expected_artifacts.extend(['visualizations/', 'reports/'])
+
+            logger.info("Verifying MinIO artifact storage...")
+            verification_results = verify_s3_artifacts(
+                run_id=current_run_id,
+                expected_artifacts=expected_artifacts,
+            )
+            log_s3_verification_results(verification_results)
+
+            if not verification_results["success"]:
+                raise RuntimeError(
+                    "MinIO artifact verification failed: "
+                    + "; ".join(
+                        verification_results["errors"]
+                        + verification_results["missing_artifacts"]
+                    )
                 )
-                log_s3_verification_results(verification_results)
-                
-                if not verification_results["success"]:
-                    logger.warning("S3 artifact verification failed after sync")
-            except Exception as e:
-                logger.error(f"Failed to sync artifacts to S3: {e}")
+
+            self.mlflow_manager.end_run()
             
         except Exception as e:
             self.mlflow_manager.end_run(status="FAILED")
@@ -572,7 +594,7 @@ class ModelTrainer:
     
     def _generate_and_log_visualizations(self, results: Dict[str, Any], 
                                        test_df: pd.DataFrame, 
-                                       target_col: str = 'sales') -> None:
+                                       target_col: str = 'sales') -> bool:
         """Generate and log model comparison visualizations to MLflow"""
         try:
             from ml_models.model_visualization import ModelVisualizer
@@ -639,10 +661,13 @@ class ModelTrainer:
                 if os.path.exists(combined_report):
                     mlflow.log_artifact(combined_report, "reports")
                     logger.info("Logged combined HTML report")
+                    return True
+                return False
                     
         except Exception as e:
             logger.error(f"Failed to generate visualizations: {e}")
             # Don't fail the entire training if visualization fails
+            return False
     
     def _create_combined_html_report(self, saved_files: Dict[str, str], save_dir: str) -> None:
         """Create a combined HTML report with all visualizations"""
@@ -728,26 +753,19 @@ class ModelTrainer:
             f.write(html_content)
     
     def save_artifacts(self):
-        # Save scalers and encoders
-        joblib.dump(self.scalers, '/tmp/scalers.pkl')
-        joblib.dump(self.encoders, '/tmp/encoders.pkl')
-        joblib.dump(self.feature_cols, '/tmp/feature_cols.pkl')
-        
-        # Save individual models in the expected format
-        import os
-        os.makedirs('/tmp/models/xgboost', exist_ok=True)
-        os.makedirs('/tmp/models/lightgbm', exist_ok=True)
-        os.makedirs('/tmp/models/ensemble', exist_ok=True)
-        
-        if 'xgboost' in self.models:
-            joblib.dump(self.models['xgboost'], '/tmp/models/xgboost/xgboost_model.pkl')
-        
-        if 'lightgbm' in self.models:
-            joblib.dump(self.models['lightgbm'], '/tmp/models/lightgbm/lightgbm_model.pkl')
-            
-        if 'ensemble' in self.models:
-            joblib.dump(self.models['ensemble'], '/tmp/models/ensemble/ensemble_model.pkl')
-        
-        self.mlflow_manager.log_artifacts('/tmp/')
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            joblib.dump(self.scalers, os.path.join(artifact_dir, 'scalers.pkl'))
+            joblib.dump(self.encoders, os.path.join(artifact_dir, 'encoders.pkl'))
+            joblib.dump(self.feature_cols, os.path.join(artifact_dir, 'feature_cols.pkl'))
+
+            model_dir = os.path.join(artifact_dir, 'models')
+            for model_name, model in self.models.items():
+                target_dir = os.path.join(model_dir, model_name)
+                os.makedirs(target_dir, exist_ok=True)
+                joblib.dump(model, os.path.join(target_dir, f'{model_name}_model.pkl'))
+
+            self.mlflow_manager.log_artifacts(artifact_dir)
         
         logger.info("Artifacts saved successfully")

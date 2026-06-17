@@ -211,7 +211,7 @@ def sales_forecast_training():
                 for metric, value in model_results["metrics"].items():
                     print(f" {metric}: {value:.4f}")
 
-        print("\nVisualization charts have been generated and saved to MLflow/MinIO")
+        print("\nModel artifacts have been saved to MLflow/MinIO")
 
         serializable_results = {}
 
@@ -241,17 +241,21 @@ def sales_forecast_training():
         return {
             "best_model": best_model_name,
             "best_run_id": training_result.get("mlflow_run_id"),
+            "trained_models": list(results.keys()),
         }
     
     @task()
     def register_best_model_task(evaluation_result):
         from utils.mlflow_utils import MLflowManager
 
-        evaluation_result["best_model"]
         run_id = evaluation_result["best_run_id"]
+        trained_models = set(evaluation_result.get("trained_models", []))
         mlflow_manager = MLflowManager()
         model_versions = {}
-        for model_name in ["xgboost", "lightgbm"]:
+        for model_name in ["xgboost", "lightgbm", "prophet", "ensemble"]:
+            if model_name not in trained_models:
+                print(f"Skipping {model_name}; it was not trained in this run")
+                continue
             version = mlflow_manager.register_model(run_id, model_name, model_name)
             model_versions[model_name] = version
             print(f"Registered {model_name} version: {version}")

@@ -4,6 +4,10 @@ import mlflow.sklearn
 import mlflow.xgboost
 import mlflow.lightgbm
 import mlflow.pyfunc
+try:
+    import mlflow.prophet as mlflow_prophet
+except Exception:  # pragma: no cover - depends on optional MLflow flavor availability
+    mlflow_prophet = None
 from mlflow.tracking import MlflowClient
 from typing import Dict, Any, Optional, List
 import yaml
@@ -101,6 +105,13 @@ class MLflowManager:
                 )
             elif model_name == "lightgbm":
                 mlflow.lightgbm.save_model(
+                    model,
+                    path=mlflow_model_path,
+                    input_example=input_example,
+                    signature=signature,
+                )
+            elif model_name == "prophet" and mlflow_prophet is not None:
+                mlflow_prophet.save_model(
                     model,
                     path=mlflow_model_path,
                     input_example=input_example,
@@ -208,15 +219,16 @@ class MLflowManager:
         mlflow.end_run(status=status)
         logger.info("Ended MLflow run")
         
-        # Sync artifacts to S3 after run ends
+        # MLflow writes artifacts through its configured artifact backend.
+        # Verify MinIO here for visibility; training performs a strict check.
         if run_id and status == "FINISHED":
             try:
                 from utils.mlflow_s3_utils import MLflowS3Manager
                 s3_manager = MLflowS3Manager()
                 s3_manager.sync_mlflow_artifacts_to_s3(run_id)
-                logger.info(f"Synced artifacts to S3 for run {run_id}")
+                logger.info(f"Verified artifacts in MinIO for run {run_id}")
             except Exception as e:
-                logger.warning(f"Failed to sync artifacts to S3: {e}")
+                logger.warning(f"MinIO artifact verification failed: {e}")
     
     def get_best_model(self, metric: str = "rmse", ascending: bool = True) -> Dict[str, Any]:
         experiment = mlflow.get_experiment_by_name(self.experiment_name)

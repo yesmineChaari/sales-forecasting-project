@@ -23,7 +23,7 @@ models:
       random_state: 42
   
   prophet:
-    enabled: false  # Set to true if Prophet is working in your environment
+    enabled: true
     params:
       seasonality_mode: "multiplicative"
       changepoint_prior_scale: 0.05

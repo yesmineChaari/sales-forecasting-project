@@ -1,116 +1,107 @@
 """
-S3 artifact verification utilities for MLflow
+S3 artifact verification utilities for MLflow.
 """
 
-import os
-import boto3
-from botocore.client import Config
-import mlflow
 import logging
-from typing import Dict, List, Optional
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
+import boto3
+import mlflow
+from botocore.client import Config
 
 logger = logging.getLogger(__name__)
 
 
-def verify_s3_artifacts(run_id: str, expected_artifacts: Optional[List[str]] = None) -> Dict[str, any]:
+def _resolve_bucket_and_prefix(artifact_uri: str) -> Tuple[str, str]:
+    if artifact_uri.startswith("s3://"):
+        parts = artifact_uri.replace("s3://", "", 1).split("/", 1)
+        bucket = parts[0]
+        prefix = parts[1] if len(parts) > 1 else ""
+        return bucket, prefix.rstrip("/")
+
+    if artifact_uri.startswith("mlflow-artifacts:/"):
+        bucket = os.getenv("MLFLOW_ARTIFACT_BUCKET", "mlflow-artifacts")
+        prefix = artifact_uri.replace("mlflow-artifacts:/", "", 1).lstrip("/")
+        return bucket, prefix.rstrip("/")
+
+    raise ValueError(f"Artifact URI is not backed by S3/MinIO: {artifact_uri}")
+
+
+def verify_s3_artifacts(
+    run_id: str,
+    expected_artifacts: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """
-    Verify that MLflow artifacts are stored in MinIO S3
-    
-    Args:
-        run_id: MLflow run ID to check
-        expected_artifacts: List of expected artifact paths (optional)
-    
-    Returns:
-        Dictionary with verification results
+    Verify that MLflow artifacts for a run are present in MinIO/S3.
     """
     results = {
         "success": False,
         "artifact_uri": "",
         "s3_artifacts": [],
         "missing_artifacts": [],
-        "errors": []
+        "errors": [],
     }
-    
+
     try:
-        # Get artifact URI from MLflow
         client = mlflow.tracking.MlflowClient()
         run = client.get_run(run_id)
         artifact_uri = run.info.artifact_uri
         results["artifact_uri"] = artifact_uri
-        
-        # Check if artifact URI is S3
-        if not artifact_uri.startswith("s3://"):
-            results["errors"].append(f"Artifact URI is not S3: {artifact_uri}")
-            return results
-        
-        # Parse S3 URI
-        # Format: s3://bucket/path/to/artifacts
-        parts = artifact_uri.replace("s3://", "").split("/", 1)
-        bucket = parts[0]
-        prefix = parts[1] if len(parts) > 1 else ""
-        
-        # Create S3 client
+
+        bucket, prefix = _resolve_bucket_and_prefix(artifact_uri)
+
         s3_client = boto3.client(
-            's3',
-            endpoint_url=os.getenv('MLFLOW_S3_ENDPOINT_URL', 'http://minio:9000'),
-            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'minioadmin'),
-            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'minioadmin'),
-            config=Config(signature_version='s3v4'),
-            region_name='us-east-1'
+            "s3",
+            endpoint_url=os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID", "minioadmin"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+            config=Config(signature_version="s3v4"),
+            region_name="us-east-1",
         )
-        
-        # List objects in S3
-        response = s3_client.list_objects_v2(
-            Bucket=bucket,
-            Prefix=prefix
-        )
-        
-        if 'Contents' in response:
-            # Extract relative paths
-            s3_objects = []
-            for obj in response['Contents']:
-                relative_path = obj['Key'].replace(prefix, "").lstrip("/")
-                if relative_path:  # Skip empty paths
+
+        s3_objects = []
+        paginator = s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                relative_path = obj["Key"].replace(prefix, "", 1).lstrip("/")
+                if relative_path:
                     s3_objects.append(relative_path)
-            
+
+        if s3_objects:
             results["s3_artifacts"] = s3_objects
-            
-            # Check for expected artifacts
+
             if expected_artifacts:
                 for expected in expected_artifacts:
-                    found = False
-                    for artifact in s3_objects:
-                        if expected in artifact:
-                            found = True
-                            break
-                    if not found:
+                    if not any(expected in artifact for artifact in s3_objects):
                         results["missing_artifacts"].append(expected)
-            
-            results["success"] = len(s3_objects) > 0 and len(results["missing_artifacts"]) == 0
-            
-            logger.info(f"Found {len(s3_objects)} artifacts in S3 for run {run_id}")
-            logger.info(f"Artifacts: {', '.join(s3_objects[:5])}...")  # Log first 5
-            
+
+            results["success"] = not results["missing_artifacts"]
+            logger.info("Found %s artifacts in S3 for run %s", len(s3_objects), run_id)
+            logger.info("Artifacts: %s...", ", ".join(s3_objects[:5]))
         else:
             results["errors"].append("No artifacts found in S3")
-            
+
     except Exception as e:
         results["errors"].append(str(e))
-        logger.error(f"Error verifying S3 artifacts: {e}")
-    
+        logger.error("Error verifying S3 artifacts: %s", e)
+
     return results
 
 
-def log_s3_verification_results(results: Dict[str, any]):
-    """Log S3 verification results"""
+def log_s3_verification_results(results: Dict[str, Any]):
+    """Log S3 verification results."""
     if results["success"]:
-        logger.info("✓ S3 artifact verification PASSED")
-        logger.info(f"  - Artifact URI: {results['artifact_uri']}")
-        logger.info(f"  - Total artifacts: {len(results['s3_artifacts'])}")
+        logger.info("S3 artifact verification PASSED")
+        logger.info("  - Artifact URI: %s", results["artifact_uri"])
+        logger.info("  - Total artifacts: %s", len(results["s3_artifacts"]))
     else:
-        logger.error("✗ S3 artifact verification FAILED")
-        logger.error(f"  - Artifact URI: {results['artifact_uri']}")
+        logger.error("S3 artifact verification FAILED")
+        logger.error("  - Artifact URI: %s", results["artifact_uri"])
         for error in results["errors"]:
-            logger.error(f"  - Error: {error}")
+            logger.error("  - Error: %s", error)
         if results["missing_artifacts"]:
-            logger.error(f"  - Missing artifacts: {', '.join(results['missing_artifacts'])}")
+            logger.error(
+                "  - Missing artifacts: %s",
+                ", ".join(results["missing_artifacts"]),
+            )
