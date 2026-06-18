@@ -32,6 +32,8 @@ if 'model_loader' not in st.session_state:
     st.session_state.predictor = SimplePredictor(st.session_state.model_loader)
     st.session_state.models_loaded = False
     st.session_state.run_id = None
+if 'input_data' not in st.session_state:
+    st.session_state.input_data = None
 
 # Header
 st.title("🔮 Sales Forecast Inference")
@@ -112,6 +114,8 @@ if st.session_state.models_loaded:
             if missing_cols:
                 st.error(f"Missing required columns: {missing_cols}")
                 input_data = None
+            else:
+                st.session_state.input_data = input_data
     
     with tab2:
         st.markdown("### Enter Recent Sales Data")
@@ -146,6 +150,7 @@ if st.session_state.models_loaded:
         
         if st.button("Use Manual Data", key="manual_btn"):
             input_data = pd.DataFrame(manual_data)
+            st.session_state.input_data = input_data
             st.success("✅ Manual data ready for prediction")
     
     with tab3:
@@ -176,6 +181,7 @@ if st.session_state.models_loaded:
                 'store_id': 'store_001',
                 'sales': sales
             })
+            st.session_state.input_data = input_data
             
             st.success("✅ Sample data generated")
             
@@ -194,6 +200,11 @@ if st.session_state.models_loaded:
                 height=300
             )
             st.plotly_chart(fig, use_container_width=True)
+
+    # Streamlit reruns the script after button clicks. Keep the selected input
+    # data available so clicking Run Prediction does not hide the forecast UI.
+    if input_data is None and st.session_state.input_data is not None:
+        input_data = st.session_state.input_data
     
     # Prediction section
     if input_data is not None:

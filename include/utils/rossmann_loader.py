@@ -22,6 +22,12 @@ class RossmannDataLoader:
         self.train_path = train_path
         self.store_path = store_path
 
+    @staticmethod
+    def _normalize_state_holiday(series: pd.Series) -> pd.Series:
+        no_holiday_values = {"", "0", "0.0", "none", "nan", "nat", "false"}
+        normalized = series.fillna("").astype(str).str.strip().str.lower()
+        return normalized.where(~normalized.isin(no_holiday_values), "none")
+
     def _load_and_prepare(self) -> pd.DataFrame:
         train_df = pd.read_csv(self.train_path, low_memory=False)
         store_df = pd.read_csv(self.store_path, low_memory=False)
@@ -34,11 +40,8 @@ class RossmannDataLoader:
         df["Open"] = df["Open"].fillna(1).astype(int)
         df = df[(df["Open"] == 1) & (df["Sales"] > 0)].copy()
 
-        state_holiday = (
-            df["StateHoliday"]
-            .astype(str)
-            .replace({"0": "none", "nan": "none"})
-        )
+        state_holiday = self._normalize_state_holiday(df["StateHoliday"])
+        school_holiday = df["SchoolHoliday"].fillna(0).astype(int)
 
         prepared_df = pd.DataFrame(
             {
@@ -49,10 +52,10 @@ class RossmannDataLoader:
                 "has_promotion": df["Promo"].fillna(0).astype(int),
                 "is_open": df["Open"].astype(int),
                 "state_holiday": state_holiday,
-                "school_holiday": df["SchoolHoliday"].fillna(0).astype(int),
+                "school_holiday": school_holiday,
                 "is_holiday": (
                     (state_holiday != "none")
-                    | (df["SchoolHoliday"].fillna(0).astype(int) == 1)
+                    | (school_holiday == 1)
                 ).astype(int),
                 "store_type": df["StoreType"].fillna("unknown").astype(str),
                 "assortment": df["Assortment"].fillna("unknown").astype(str),

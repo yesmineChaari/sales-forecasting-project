@@ -106,16 +106,10 @@ services:
 
   # Streamlit UI for model inference
   streamlit-ui:
-    image: python:3.11-slim
+    image: sales-forcasting_36f28c/airflow:latest
     platform: linux/amd64
     working_dir: /app
-    command: >
-      bash -c "
-      apt-get update && apt-get install -y libgomp1 build-essential cmake &&
-      pip install --no-cache-dir streamlit==1.29.0 pandas==2.1.4 numpy==1.24.3 scikit-learn==1.3.2 matplotlib==3.8.2 seaborn==0.13.0 plotly==5.18.0 mlflow==2.9.2 boto3==1.34.14 lightgbm==4.2.0 catboost==1.2.2 xgboost==2.0.3 &&
-      chmod +x /app/entrypoint.sh &&
-      /app/entrypoint.sh
-      "
+    command: streamlit run inference_app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
     ports:
       - '8501:8501'
     environment:

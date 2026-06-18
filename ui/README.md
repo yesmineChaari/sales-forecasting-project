@@ -1,118 +1,101 @@
-# Sales Forecasting UI
+# Streamlit Forecast UI
 
-A Streamlit-based web interface for sales forecasting using trained ML models.
+This directory contains the Streamlit dashboard for exploring trained Rossmann store-level forecasting models.
 
-## Features
+## Entry Point
 
-- 🔮 **Model Inference**: Generate sales forecasts using trained models
-- 📊 **Multiple Input Methods**: Upload CSV, manual entry, or use sample data
-- 📈 **Interactive Visualizations**: View predictions with confidence intervals
-- 🤖 **Model Selection**: Choose between ensemble, XGBoost, or LightGBM
-- 💾 **Export Results**: Download predictions as CSV
-- 🎯 **Real-time Predictions**: Get instant forecasts with loaded models
-
-## Quick Start
-
-### Using Docker Compose (Recommended)
-
-The UI is included in the main docker-compose setup:
+Run the app with:
 
 ```bash
-# Start all services including UI
-docker-compose -f docker-compose.override.yml up -d
-
-# Access the UI
-open http://localhost:8501
-```
-
-### Local Development
-
-```bash
-# Navigate to UI directory
-cd ui
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set environment variables
-export MLFLOW_TRACKING_URI=http://localhost:5001
-export MLFLOW_S3_ENDPOINT_URL=http://localhost:9000
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-
-# Run the app
 streamlit run inference_app.py
 ```
 
-## Usage
+The container entrypoint also starts `inference_app.py` on port `8501`.
 
-1. **Load Models**: Click "Load/Reload Models" in the sidebar
-2. **Select Input Method**:
-   - Upload CSV with historical sales data
-   - Enter recent sales manually
-   - Generate sample data for testing
-3. **Configure Forecast**:
-   - Choose model type (ensemble recommended)
-   - Set forecast horizon (1-90 days)
-4. **Generate Predictions**: Click "Run Prediction"
-5. **Export Results**: Download forecast as CSV
+## What The UI Loads
 
-## Input Data Format
+The active UI path uses:
 
-CSV files should contain:
-- `date`: Date column (YYYY-MM-DD format)
-- `sales`: Sales amount (numeric)
-- `store_id`: Store identifier (optional)
+- `utils/simple_model_loader.py`
+- `utils/simple_predictor.py`
+- MLflow run artifacts from the latest finished training run
+
+It loads legacy pickle artifacts such as:
+
+```text
+models/xgboost/xgboost_model.pkl
+models/lightgbm/lightgbm_model.pkl
+models/ensemble/ensemble_model.pkl
+```
+
+This UI does not call a FastAPI endpoint. The FastAPI online inference path was removed because store-level lag and rolling features require historical sales context.
+
+## Models
+
+The UI exposes store-level models only:
+
+- `ensemble`
+- `xgboost`
+- `lightgbm`
+
+Prophet is not exposed in the UI because it is a daily-total baseline, not a store-level model.
+
+## Input Data
+
+CSV uploads should include:
+
+- `date`: date column in `YYYY-MM-DD` format
+- `sales`: historical sales amount
+- `store_id`: optional store identifier
 
 Example:
+
 ```csv
 date,store_id,sales
 2024-01-01,store_001,5234.50
 2024-01-02,store_001,4892.75
 ```
 
-## Models
+The dashboard is a demo/exploration interface around MLflow artifacts. Production-quality online store-level inference remains out of scope until recent historical sales features are available at prediction time.
 
-The UI supports three model types:
-- **Ensemble**: Combines XGBoost and LightGBM (recommended)
-- **XGBoost**: Gradient boosting model
-- **LightGBM**: Light gradient boosting model
+## Local Development
 
-## Architecture
+Start the project services from the repository root:
 
+```bash
+astro dev start
 ```
+
+Then run the UI locally if needed:
+
+```bash
+cd ui
+pip install -r requirements.txt
+streamlit run inference_app.py
+```
+
+Environment variables used by the UI:
+
+- `MLFLOW_TRACKING_URI`
+- `MLFLOW_S3_ENDPOINT_URL`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+
+## Directory
+
+```text
 ui/
-├── app.py              # Main multi-page app
-├── inference_app.py    # Simplified inference-only app
-├── pages/
-│   └── inference.py    # Inference page for multi-page app
-├── utils/
-│   └── model_loader.py # Model loading and prediction utilities
-├── requirements.txt    # Python dependencies
-├── Dockerfile         # Container configuration
-└── README.md         # This file
+|-- inference_app.py
+|-- entrypoint.sh
+|-- pages/
+|   `-- inference.py
+|-- utils/
+|   |-- simple_model_loader.py
+|   |-- simple_predictor.py
+|   |-- production_model_loader.py
+|   `-- ensemble_model_standalone.py
+|-- requirements.txt
+|-- Dockerfile
+|-- Dockerfile.streamlit
+`-- README.md
 ```
-
-## Environment Variables
-
-- `MLFLOW_TRACKING_URI`: MLflow server URL (default: http://mlflow:5001)
-- `MLFLOW_S3_ENDPOINT_URL`: MinIO endpoint (default: http://minio:9000)
-- `AWS_ACCESS_KEY_ID`: MinIO access key
-- `AWS_SECRET_ACCESS_KEY`: MinIO secret key
-
-## Troubleshooting
-
-### Models not loading
-- Ensure MLflow service is running
-- Check that models have been trained (run training DAG first)
-- Verify network connectivity between services
-
-### Predictions failing
-- Check input data format
-- Ensure all required columns are present
-- Verify model compatibility with input features
-
-### UI not accessible
-- Check if port 8501 is available
-- Verify Docker container is running: `docker ps`
-- Check logs: `docker logs sales-forecasting_420ea7-streamlit-ui-1`

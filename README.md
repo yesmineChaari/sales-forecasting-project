@@ -1,45 +1,95 @@
-Overview
-========
+# Rossmann Sales Forecasting MLOps Pipeline
 
-Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+Airflow DAG -> Rossmann data preparation -> validation -> feature engineering -> model training -> MLflow/MinIO tracking -> model registry
 
-Project Contents
-================
+## Overview
 
-Your Astro project contains the following files and folders:
+This project trains and tracks Rossmann sales forecasting models with Apache Airflow, MLflow, MinIO, and a Streamlit dashboard. The active training DAG is `sales_forecast_training` in `dags/sales_forecast_train.py`.
 
-- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
-    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
-- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
-- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
-- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
-- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
-- plugins: Add custom or community plugins for your project to this file. It is empty by default.
-- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
+The main machine-learning grain is:
 
-Deploy Your Project Locally
-===========================
+```text
+date + store_id -> store sales
+```
 
-Start Airflow on your local machine by running 'astro dev start'.
+Prophet is handled separately as a daily-total baseline:
 
-This command will spin up five Docker containers on your machine, each for a different Airflow component:
+```text
+date -> total daily sales across all stores
+```
 
-- Postgres: Airflow's Metadata Database
-- Scheduler: The Airflow component responsible for monitoring and triggering tasks
-- DAG Processor: The Airflow component responsible for parsing DAGs
-- API Server: The Airflow component responsible for serving the Airflow UI and API
-- Triggerer: The Airflow component responsible for triggering deferred tasks
+## Model Semantics
 
-When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
+| Model | Forecast grain | Target | Compared with |
+|---|---|---|---|
+| XGBoost | date + store_id | store sales | LightGBM, ensemble |
+| LightGBM | date + store_id | store sales | XGBoost, ensemble |
+| Ensemble | date + store_id | store sales | XGBoost, LightGBM |
+| Prophet | date | total daily sales | daily-total baseline only |
 
-Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
+Prophet is not part of the store-level ensemble because it forecasts daily total sales, not individual store sales.
 
-Deploy Your Project to Astronomer
-=================================
+## Pipeline
 
-If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+The Airflow DAG:
 
-Contact
-=======
+1. Loads Rossmann CSV data and writes parquet files.
+2. Validates selected sales files. `MAX_SALES_FILES` limits training input, and `VALIDATION_MAX_SALES_FILES` can explicitly sample validation.
+3. Aggregates to `date + store_id`.
+4. Creates leakage-safe lag and rolling features using past store history only.
+5. Trains XGBoost, LightGBM, the XGBoost/LightGBM store-level ensemble, and optionally Prophet daily-total.
+6. Logs models and artifacts to MLflow/MinIO.
+7. Registers all trained model artifacts and tags/reports the best store-level model.
 
-The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+## Model Registry
+
+All valid trained models are registered when available:
+
+- `xgboost_store_level`
+- `lightgbm_store_level`
+- `ensemble_store_level`
+- `prophet_daily_total`
+
+The best store-level model is tagged and reported separately from the daily-total Prophet baseline. Prophet is registered as a separate daily-total model if it trains successfully.
+
+## Serving And UI
+
+The old FastAPI online inference service was decommissioned because correct store-level lag and rolling features require historical sales context at prediction time. A one-row request cannot safely create those features.
+
+The Streamlit UI entry point is:
+
+```bash
+ui/inference_app.py
+```
+
+The UI reads MLflow run artifacts directly through its local loaders. It does not call a FastAPI endpoint.
+
+## Run Locally
+
+Start the Astronomer/Airflow stack and the extra MLflow, MinIO, and Streamlit services:
+
+```bash
+astro dev start
+```
+
+Useful local URLs:
+
+- Airflow: `http://localhost:8080`
+- MLflow: `http://localhost:5001`
+- MinIO: `http://localhost:9001`
+- Streamlit UI: `http://localhost:8501`
+
+For local UI-only development after services are running:
+
+```bash
+cd ui
+streamlit run inference_app.py
+```
+
+## Configuration
+
+Common environment variables:
+
+- `MAX_SALES_FILES`: cap training files; `0` means all files.
+- `VALIDATION_MAX_SALES_FILES`: cap validation files from the selected training files; `0` means full validation.
+- `ENABLE_MODEL_VISUALIZATIONS`: set to `true` to generate and log optional model visualizations.

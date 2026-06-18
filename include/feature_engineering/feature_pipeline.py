@@ -16,6 +16,39 @@ class FeatureEngineer:
         
         self.feature_config = self.config['features']
         self.validation_config = self.config['validation']
+
+    @staticmethod
+    def _state_holiday_flags(series: pd.Series) -> pd.Series:
+        no_holiday_values = {"", "0", "0.0", "none", "nan", "nat", "false"}
+        normalized = series.fillna("").astype(str).str.strip().str.lower()
+        return ~normalized.isin(no_holiday_values)
+
+    @staticmethod
+    def _binary_holiday_flags(series: pd.Series) -> pd.Series:
+        numeric = pd.to_numeric(series, errors="coerce").fillna(0)
+        text = series.fillna("").astype(str).str.strip().str.lower()
+        return (numeric != 0) | text.isin({"true", "yes", "y"})
+
+    def _create_rossmann_holiday_feature(
+        self, df: pd.DataFrame, date_col: str
+    ) -> pd.Series:
+        holiday_flags = []
+
+        if 'is_holiday' in df.columns:
+            holiday_flags.append(self._binary_holiday_flags(df['is_holiday']))
+        if 'state_holiday' in df.columns:
+            holiday_flags.append(self._state_holiday_flags(df['state_holiday']))
+        if 'school_holiday' in df.columns:
+            holiday_flags.append(self._binary_holiday_flags(df['school_holiday']))
+
+        if holiday_flags:
+            combined = holiday_flags[0].copy()
+            for flags in holiday_flags[1:]:
+                combined = combined | flags
+            return combined.astype(int)
+
+        de_holidays = holidays.country_holidays("DE")
+        return df[date_col].dt.date.apply(lambda value: value in de_holidays).astype(int)
         
     def create_date_features(self, df: pd.DataFrame, date_col: str = 'date') -> pd.DataFrame:
         df = df.copy()
@@ -39,8 +72,8 @@ class FeatureEngineer:
         if 'is_weekend' in date_features:
             df['is_weekend'] = (df[date_col].dt.dayofweek >= 5).astype(int)
         if 'is_holiday' in date_features:
-            us_holidays = holidays.US()
-            df['is_holiday'] = df[date_col].apply(lambda x: x in us_holidays).astype(int)
+            # Prefer Rossmann/Germany holiday fields already present in the dataset.
+            df['is_holiday'] = self._create_rossmann_holiday_feature(df, date_col)
         
         logger.info(f"Created {len(date_features)} date features")
         return df
@@ -70,14 +103,16 @@ class FeatureEngineer:
             for window in windows:
                 for func in functions:
                     col_name = f'{target_col}_rolling_{window}_{func}'
+                    # Shift first so same-day sales never leak into features.
                     df[col_name] = df.groupby(group_cols)[target_col].transform(
-                        lambda x: x.rolling(window, min_periods=1).agg(func)
+                        lambda x: x.shift(1).rolling(window, min_periods=1).agg(func)
                     )
         else:
             for window in windows:
                 for func in functions:
                     col_name = f'{target_col}_rolling_{window}_{func}'
-                    df[col_name] = df[target_col].rolling(window, min_periods=1).agg(func)
+                    # Shift first so same-day sales never leak into features.
+                    df[col_name] = df[target_col].shift(1).rolling(window, min_periods=1).agg(func)
         
         logger.info(f"Created {len(windows) * len(functions)} rolling features")
         return df
@@ -146,14 +181,14 @@ class FeatureEngineer:
         return df
     
     def handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
-        # For lag and rolling features, forward fill or use mean
+        # For lag and rolling features, use a neutral value for rows with no
+        # prior history. Do not backfill from future target values.
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         
         for col in numeric_columns:
             if df[col].isnull().any():
                 if 'lag' in col or 'rolling' in col:
-                    # For time-based features, forward fill then backward fill
-                    df[col] = df[col].ffill().bfill()
+                    df[col] = df[col].fillna(0)
                 else:
                     # For other features, use mean
                     df[col] = df[col].fillna(df[col].mean())
@@ -224,7 +259,13 @@ class FeatureEngineer:
         
         # Ratio features
         for window in [7, 30]:
-            rolling_mean = df[target_col].rolling(window, min_periods=1).mean()
+            # Shift first so ratios only compare against past target history.
+            if group_cols:
+                rolling_mean = df.groupby(group_cols)[target_col].transform(
+                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
+                )
+            else:
+                rolling_mean = df[target_col].shift(1).rolling(window, min_periods=1).mean()
             df[f'{target_col}_ratio_to_{window}d_avg'] = df[target_col] / (rolling_mean + 1)
         
         # Day of month features
@@ -246,7 +287,13 @@ class FeatureEngineer:
         
         # Ratio features that capture relative performance
         for window in [7, 30]:
-            rolling_mean = df[target_col].rolling(window, min_periods=1).mean()
+            # Shift first so ratios only compare against past target history.
+            if group_cols:
+                rolling_mean = df.groupby(group_cols)[target_col].transform(
+                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
+                )
+            else:
+                rolling_mean = df[target_col].shift(1).rolling(window, min_periods=1).mean()
             df[f'{target_col}_ratio_to_{window}d'] = df[target_col] / (rolling_mean + 1)
         
         # Days since month start (useful for monthly patterns)

@@ -149,8 +149,9 @@ if st.session_state.models_loaded:
         # Store in session state to persist across reruns
         st.session_state.input_data = input_data
     
-    # Check for input_data in session state if not set locally
-    if 'input_data' not in locals() and 'input_data' in st.session_state:
+    # Streamlit reruns the script after button clicks, so restore the selected
+    # input data before rendering the forecast action.
+    if input_data is None and 'input_data' in st.session_state:
         input_data = st.session_state.input_data
     
     # Generate predictions

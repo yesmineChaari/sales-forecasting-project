@@ -83,6 +83,43 @@ class MLflowManager:
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None):
         for key, value in metrics.items():
             mlflow.log_metric(key, value, step=step)
+
+    @staticmethod
+    def _tag_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return str(value).lower()
+        if isinstance(value, (list, tuple, set)):
+            return ",".join(str(item) for item in value)
+        return str(value)
+
+    def set_run_tags(self, run_id: str, tags: Dict[str, Any]):
+        for key, value in tags.items():
+            self.client.set_tag(run_id, key, self._tag_value(value))
+
+    def set_model_version_tags(
+        self,
+        model_name: str,
+        version: str,
+        tags: Dict[str, Any],
+    ) -> bool:
+        if not hasattr(self.client, "set_model_version_tag"):
+            logger.warning("MLflow client does not support model version tags")
+            return False
+
+        registered_name = self._registered_model_name(model_name)
+        for key, value in tags.items():
+            self.client.set_model_version_tag(
+                name=registered_name,
+                version=str(version),
+                key=key,
+                value=self._tag_value(value),
+            )
+        return True
+
+    def registered_model_name(self, model_name: str) -> str:
+        return self._registered_model_name(model_name)
     
     def log_model(self, model, model_name: str, input_example: Optional[pd.DataFrame] = None,
                   signature: Optional[Any] = None, registered_model_name: Optional[str] = None):
@@ -110,7 +147,7 @@ class MLflowManager:
                     input_example=input_example,
                     signature=signature,
                 )
-            elif model_name == "prophet" and mlflow_prophet is not None:
+            elif model_name in {"prophet", "prophet_daily_total"} and mlflow_prophet is not None:
                 mlflow_prophet.save_model(
                     model,
                     path=mlflow_model_path,

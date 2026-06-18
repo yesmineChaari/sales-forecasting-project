@@ -9,7 +9,7 @@ from datetime import datetime
 
 from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.preprocessing import StandardScaler, OrdinalEncoder
+from sklearn.preprocessing import OrdinalEncoder
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -20,7 +20,6 @@ import mlflow
 from utils.mlflow_utils import MLflowManager
 from feature_engineering.feature_pipeline import FeatureEngineer
 from data_validation.validators import DataValidator
-from ml_models.advanced_ensemble import AdvancedEnsemble
 from ml_models.diagnostics import diagnose_model_performance
 from ml_models.ensemble_model import EnsembleModel
 
@@ -39,7 +38,6 @@ class ModelTrainer:
         self.data_validator = DataValidator(config_path)
         
         self.models = {}
-        self.scalers = {}
         self.encoders = {}
         
     def prepare_data(self, df: pd.DataFrame, target_col: str = 'sales',
@@ -48,9 +46,7 @@ class ModelTrainer:
         
         logger.info("Preparing data for training")
         
-        # Skip validation for aggregated data that doesn't include product_id
-        # The validation expects product-level data but we're training on store-level aggregates
-        # Validate only essential columns
+        # Validate only the store-level training grain used by Rossmann.
         required_cols = ['date', target_col]
         if group_cols:
             required_cols.extend(group_cols)
@@ -115,11 +111,11 @@ class ModelTrainer:
                     handle_unknown='use_encoded_value',
                     unknown_value=-1,
                 )
-                X_train.loc[:, col] = self.encoders[col].fit_transform(
+                X_train[col] = self.encoders[col].fit_transform(
                     X_train[[col]].astype(str)
                 ).ravel()
             else:
-                X_train.loc[:, col] = self.encoders[col].transform(
+                X_train[col] = self.encoders[col].transform(
                     X_train[[col]].astype(str)
                 ).ravel()
 
@@ -134,28 +130,30 @@ class ModelTrainer:
                     test_unknowns,
                 )
             
-            X_val.loc[:, col] = self.encoders[col].transform(
+            X_val[col] = self.encoders[col].transform(
                 X_val[[col]].astype(str)
             ).ravel()
-            X_test.loc[:, col] = self.encoders[col].transform(
+            X_test[col] = self.encoders[col].transform(
                 X_test[[col]].astype(str)
             ).ravel()
+
+        for split_name, frame in {
+            "train": X_train,
+            "validation": X_val,
+            "test": X_test,
+        }.items():
+            non_numeric_cols = frame.select_dtypes(
+                include=['object', 'category']
+            ).columns.tolist()
+            if non_numeric_cols:
+                raise ValueError(
+                    f"Non-numeric features remain after encoding in "
+                    f"{split_name}: {non_numeric_cols}"
+                )
         
-        # Scale numerical features
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # Convert back to DataFrame to preserve feature names
-        X_train_scaled = pd.DataFrame(X_train_scaled, columns=feature_cols, index=X_train.index)
-        X_val_scaled = pd.DataFrame(X_val_scaled, columns=feature_cols, index=X_val.index)
-        X_test_scaled = pd.DataFrame(X_test_scaled, columns=feature_cols, index=X_test.index)
-        
-        self.scalers['standard'] = scaler
         self.feature_cols = feature_cols
         
-        return X_train_scaled, X_val_scaled, X_test_scaled, y_train, y_val, y_test
+        return X_train, X_val, X_test, y_train, y_val, y_test
     
     def calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
         nonzero_mask = y_true != 0
@@ -271,70 +269,53 @@ class ModelTrainer:
         self.models['lightgbm'] = model
         return model
     
-    def train_prophet(self, train_df: pd.DataFrame, val_df: pd.DataFrame,
-                date_col: str = 'date', target_col: str = 'sales') -> Prophet:
-        
-        logger.info("Training Prophet model")
-        
-        # Prepare store-day rows for Prophet. This keeps Prophet on the same
-        # target grain as XGBoost and LightGBM.
-        prophet_train = train_df[[date_col, target_col]].rename(
-            columns={date_col: 'ds', target_col: 'y'}
+    def _daily_total_frame(self, df: pd.DataFrame, date_col: str,
+                           target_col: str) -> pd.DataFrame:
+        daily_df = df[[date_col, target_col]].dropna().copy()
+        daily_df[date_col] = pd.to_datetime(daily_df[date_col])
+        daily_df = (
+            daily_df.groupby(date_col, as_index=False)[target_col]
+            .sum()
+            .sort_values(date_col)
+            .rename(columns={date_col: 'ds', target_col: 'y'})
+        )
+        return daily_df
+
+    def train_prophet_daily_total(self, train_df: pd.DataFrame,
+                                  val_df: pd.DataFrame,
+                                  test_df: pd.DataFrame,
+                                  target_col: str = 'sales',
+                                  date_col: str = 'date') -> Dict[str, Any]:
+        logger.info("Training Prophet daily-total model")
+
+        daily_train = self._daily_total_frame(train_df, date_col, target_col)
+        daily_val = self._daily_total_frame(val_df, date_col, target_col)
+        daily_test = self._daily_total_frame(test_df, date_col, target_col)
+
+        if len(daily_train) < 2:
+            raise ValueError("Prophet daily-total model requires at least two training dates")
+        if daily_test.empty:
+            raise ValueError("Prophet daily-total model requires test dates for evaluation")
+
+        logger.info(
+            "Prophet daily-total rows - train: %s, val: %s, test: %s",
+            len(daily_train),
+            len(daily_val),
+            len(daily_test),
         )
 
-        prophet_train = prophet_train.dropna()
-        prophet_train = prophet_train.sort_values('ds')
-
-        if len(prophet_train) < 2:
-            raise ValueError("Prophet requires at least two observations")
-
-        logger.info("Prophet training rows: %s", len(prophet_train))
-        
-        # Initialize Prophet with simplified parameters to avoid memory issues
         prophet_params = self.model_config['prophet']['params'].copy()
-        
-        # Override some parameters for stability
         prophet_params.update({
-            'stan_backend': 'CMDSTANPY',  # Use cmdstanpy backend
-            'mcmc_samples': 0,  # Disable MCMC for speed and stability
-            'uncertainty_samples': 0,  # Keep DAG training deterministic and fast
+            'stan_backend': 'CMDSTANPY',
+            'mcmc_samples': 0,
+            'uncertainty_samples': 0,
         })
-        
+
         try:
             model = Prophet(**prophet_params)
-
-            # Add only essential numeric regressors to keep Prophet aligned with
-            # store-day features without making the fit too complex.
-            numeric_cols = train_df.select_dtypes(include=[np.number]).columns
-            regressor_cols = [
-                col
-                for col in numeric_cols
-                if col not in [target_col, 'year', 'month', 'day', 'week', 'quarter']
-            ]
-
-            if len(regressor_cols) > 5:
-                variances = {col: train_df[col].var() for col in regressor_cols}
-                regressor_cols = sorted(
-                    variances.keys(),
-                    key=lambda x: variances[x],
-                    reverse=True,
-                )[:5]
-
-            for col in regressor_cols:
-                if train_df[col].std() > 0:
-                    model.add_regressor(col)
-                    prophet_train[col] = train_df.loc[prophet_train.index, col]
-
-            model.fit(prophet_train)
-            
-            self.models['prophet'] = model
-            return model
-            
+            model.fit(daily_train)
         except Exception as e:
-            logger.error(f"Prophet training failed with parameters: {e}")
-            # Try with minimal configuration
-            logger.info("Retrying Prophet with minimal configuration...")
-            
+            logger.warning("Retrying Prophet daily-total with minimal parameters: %s", e)
             model = Prophet(
                 yearly_seasonality=True,
                 weekly_seasonality=True,
@@ -344,12 +325,28 @@ class ModelTrainer:
                 uncertainty_samples=0,
                 mcmc_samples=0
             )
-            
-            # Train without any additional regressors
-            model.fit(prophet_train[['ds', 'y']])
-            
-            self.models['prophet'] = model
-            return model
+            model.fit(daily_train[['ds', 'y']])
+
+        validation_predictions = None
+        if not daily_val.empty:
+            validation_predictions = model.predict(daily_val[['ds']])['yhat'].values
+
+        prophet_pred = model.predict(daily_test[['ds']])['yhat'].values
+        prophet_metrics = self.calculate_metrics(daily_test['y'].values, prophet_pred)
+
+        self.models['prophet_daily_total'] = model
+
+        return {
+            'model': model,
+            'metrics': prophet_metrics,
+            'predictions': prophet_pred,
+            'validation_predictions': validation_predictions,
+            'actuals': daily_test['y'].values,
+            'prediction_dates': daily_test['ds'].dt.strftime('%Y-%m-%d').tolist(),
+            'forecast_level': 'daily_total',
+            'target_grain': 'date',
+            'included_in_store_ensemble': False,
+        }
     
     def train_all_models(self, train_df: pd.DataFrame, val_df: pd.DataFrame,
                         test_df: pd.DataFrame, target_col: str = 'sales',
@@ -360,7 +357,11 @@ class ModelTrainer:
         # Start MLflow run
         run_id = self.mlflow_manager.start_run(
             run_name=f"sales_forecast_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            tags={"model_type": "ensemble", "use_optuna": str(use_optuna)}
+            tags={
+                "model_type": "store_level_ensemble",
+                "store_level_ensemble": "ensemble_store_level",
+                "use_optuna": str(use_optuna),
+            }
         )
         self.last_run_id = run_id
         
@@ -431,39 +432,46 @@ class ModelTrainer:
             
             if prophet_enabled:
                 try:
-                    prophet_model = self.train_prophet(train_df, val_df)
-                    
-                    # Create future dataframe for Prophet predictions
-                    future = test_df[['date']].rename(columns={'date': 'ds'})
-                    
-                    # Add regressors if they exist
-                    if hasattr(prophet_model, 'extra_regressors') and prophet_model.extra_regressors:
-                        regressor_cols = [col for col in prophet_model.extra_regressors.keys()]
-                        for col in regressor_cols:
-                            if col in test_df.columns:
-                                future[col] = test_df[col]
-                    
-                    prophet_pred = prophet_model.predict(future)['yhat'].values
-                    prophet_metrics = self.calculate_metrics(y_test, prophet_pred)
-                    
-                    self.mlflow_manager.log_metrics({f"prophet_{k}": v for k, v in prophet_metrics.items()})
+                    prophet_results = self.train_prophet_daily_total(
+                        train_df,
+                        val_df,
+                        test_df,
+                        target_col=target_col,
+                    )
+                    prophet_model = prophet_results['model']
+                    prophet_metrics = prophet_results['metrics']
+
+                    mlflow.set_tags({
+                        "prophet_daily_total_forecast_level": "daily_total",
+                        "prophet_daily_total_target_grain": "date",
+                        "prophet_daily_total_model_family": "prophet",
+                        "prophet_daily_total_comparable_with_store_level_models": "false",
+                    })
+                    self.mlflow_manager.log_metrics({
+                        f"prophet_daily_total_{k}": v
+                        for k, v in prophet_metrics.items()
+                    })
                     self.mlflow_manager.log_model(
                         prophet_model,
-                        "prophet",
-                        input_example=future.iloc[:5],
+                        "prophet_daily_total",
+                        input_example=pd.DataFrame({
+                            'ds': pd.to_datetime(
+                                prophet_results['prediction_dates'][:5]
+                            )
+                        }),
                     )
-                    
-                    results['prophet'] = {
-                        'model': prophet_model,
-                        'metrics': prophet_metrics,
-                        'predictions': prophet_pred
-                    }
+
+                    results['prophet_daily_total'] = prophet_results
                 except Exception as e:
-                    raise RuntimeError("Prophet is enabled but training failed") from e
+                    logger.warning(
+                        "Skipping Prophet daily-total model; training failed: %s",
+                        e,
+                        exc_info=True,
+                    )
 
             # Weighted ensemble based on validation R2. Prophet is logged as a
-            # separate model because it expects a date dataframe, while this
-            # ensemble predicts from engineered feature matrices.
+            # separate daily-total model and is not part of this store-level
+            # ensemble.
             xgb_val_pred = xgb_model.predict(X_val)
             lgb_val_pred = lgb_model.predict(X_val)
 
@@ -483,7 +491,11 @@ class ModelTrainer:
             xgb_weight = xgb_weight / total_weight
             lgb_weight = lgb_weight / total_weight
 
-            logger.info(f"Ensemble weights - XGBoost: {xgb_weight:.3f}, LightGBM: {lgb_weight:.3f}")
+            logger.info(
+                "Store-level ensemble weights - XGBoost: %.3f, LightGBM: %.3f",
+                xgb_weight,
+                lgb_weight,
+            )
 
             ensemble_weights = {
                 'xgboost': xgb_weight,
@@ -500,19 +512,44 @@ class ModelTrainer:
             
             ensemble_model = EnsembleModel(ensemble_models, ensemble_weights)
             
-            # Save ensemble model
+            ensemble_model.forecast_level = 'store_level'
+            ensemble_model.target_grain = 'date+store_id'
+            ensemble_model.ensemble_members = [
+                'xgboost_store_level',
+                'lightgbm_store_level',
+            ]
+
+            # Save under the legacy key so existing UI artifact loading still works.
             self.models['ensemble'] = ensemble_model
             
             ensemble_metrics = self.calculate_metrics(y_test, ensemble_pred)
             
+            mlflow.set_tags({
+                "ensemble_store_level_forecast_level": "store_level",
+                "ensemble_store_level_target_grain": "date+store_id",
+                "ensemble_store_level_members": "xgboost_store_level,lightgbm_store_level",
+            })
             self.mlflow_manager.log_metrics({f"ensemble_{k}": v for k, v in ensemble_metrics.items()})
+            self.mlflow_manager.log_metrics({
+                f"ensemble_store_level_{k}": v
+                for k, v in ensemble_metrics.items()
+            })
             self.mlflow_manager.log_model(ensemble_model, "ensemble", 
                                          input_example=X_train.iloc[:5])
             
-            results['ensemble'] = {
+            results['ensemble_store_level'] = {
                 'model': ensemble_model,
                 'metrics': ensemble_metrics,
-                'predictions': ensemble_pred
+                'predictions': ensemble_pred,
+                'forecast_level': 'store_level',
+                'target_grain': 'date+store_id',
+                'included_in_store_ensemble': True,
+                'ensemble_members': [
+                    'xgboost_store_level',
+                    'lightgbm_store_level',
+                ],
+                'mlflow_artifact_path': 'ensemble',
+                'legacy_model_key': 'ensemble',
             }
             
             # Run diagnostics
@@ -520,7 +557,7 @@ class ModelTrainer:
             test_predictions = {
                 'xgboost': xgb_pred if 'xgboost' in results else None,
                 'lightgbm': lgb_pred if 'lightgbm' in results else None,
-                'ensemble': ensemble_pred
+                'ensemble_store_level': ensemble_pred
             }
             
             diagnosis = diagnose_model_performance(
@@ -532,16 +569,34 @@ class ModelTrainer:
                 logger.warning(f"- {rec}")
             
             visualizations_logged = False
-            if os.getenv("ENABLE_MODEL_VISUALIZATIONS", "false").lower() == "true":
+            visualizations_enabled = (
+                os.getenv("ENABLE_MODEL_VISUALIZATIONS", "false")
+                .strip()
+                .lower()
+                == "true"
+            )
+            if visualizations_enabled:
                 logger.info("Generating model comparison visualizations...")
                 try:
                     visualizations_logged = self._generate_and_log_visualizations(results, test_df, target_col)
+                    if visualizations_logged:
+                        logger.info("Model visualizations generated and logged.")
+                    else:
+                        logger.warning(
+                            "Model visualizations were enabled but no "
+                            "visualization artifacts were logged."
+                        )
                 except Exception as viz_error:
-                    logger.error(f"Visualization generation failed: {viz_error}", exc_info=True)
+                    logger.warning(
+                        "Model visualization generation failed; continuing "
+                        "without visualization artifacts: %s",
+                        viz_error,
+                        exc_info=True,
+                    )
             else:
                 logger.info(
-                    "Skipping model comparison visualizations; "
-                    "set ENABLE_MODEL_VISUALIZATIONS=true to enable them"
+                    "Model visualizations disabled by "
+                    "ENABLE_MODEL_VISUALIZATIONS=false."
                 )
             
             # Save artifacts
@@ -559,12 +614,14 @@ class ModelTrainer:
                 'models/xgboost/',
                 'models/lightgbm/',
                 'models/ensemble/',
-                'scalers.pkl',
                 'encoders.pkl',
                 'feature_cols.pkl',
             ]
-            if 'prophet' in results:
-                expected_artifacts.extend(['prophet/MLmodel', 'models/prophet/'])
+            if 'prophet_daily_total' in results:
+                expected_artifacts.extend([
+                    'prophet_daily_total/MLmodel',
+                    'models/prophet_daily_total/',
+                ])
             if visualizations_logged:
                 expected_artifacts.extend(['visualizations/', 'reports/'])
 
@@ -607,12 +664,16 @@ class ModelTrainer:
             # Extract metrics
             metrics_dict = {}
             for model_name, model_results in results.items():
+                if model_results.get('forecast_level') == 'daily_total':
+                    continue
                 if 'metrics' in model_results:
                     metrics_dict[model_name] = model_results['metrics']
             
             # Prepare predictions data
             predictions_dict = {}
             for model_name, model_results in results.items():
+                if model_results.get('forecast_level') == 'daily_total':
+                    continue
                 if 'predictions' in model_results and model_results['predictions'] is not None:
                     pred_df = test_df[['date']].copy()
                     pred_df['prediction'] = model_results['predictions']
@@ -665,8 +726,12 @@ class ModelTrainer:
                 return False
                     
         except Exception as e:
-            logger.error(f"Failed to generate visualizations: {e}")
-            # Don't fail the entire training if visualization fails
+            logger.warning(
+                "Failed to generate visualizations; continuing without "
+                "visualization artifacts: %s",
+                e,
+                exc_info=True,
+            )
             return False
     
     def _create_combined_html_report(self, saved_files: Dict[str, str], save_dir: str) -> None:
@@ -756,7 +821,6 @@ class ModelTrainer:
         import tempfile
 
         with tempfile.TemporaryDirectory() as artifact_dir:
-            joblib.dump(self.scalers, os.path.join(artifact_dir, 'scalers.pkl'))
             joblib.dump(self.encoders, os.path.join(artifact_dir, 'encoders.pkl'))
             joblib.dump(self.feature_cols, os.path.join(artifact_dir, 'feature_cols.pkl'))
 

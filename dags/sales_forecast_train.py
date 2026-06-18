@@ -8,6 +8,198 @@ import sys
 # Add include path
 sys.path.append("/usr/local/airflow/include")
 
+from utils.model_registry import (
+    canonical_model_name,
+    canonical_model_names,
+    get_model_registry_entry,
+)
+
+
+STORE_LEVEL_MODEL_KEYS = {
+    "xgboost",
+    "xgboost_store_level",
+    "lightgbm",
+    "lightgbm_store_level",
+    "ensemble_store_level",
+}
+DAILY_TOTAL_MODEL_KEYS = {"prophet_daily_total"}
+
+
+def _parse_file_limit(raw_value, env_name):
+    try:
+        file_limit = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{env_name} must be an integer, got {raw_value!r}") from exc
+
+    return max(file_limit, 0)
+
+
+def _limit_sales_files(sales_files, raw_limit, env_name):
+    file_limit = _parse_file_limit(raw_limit, env_name)
+    sales_files = list(sales_files)
+    selected_files = sales_files if file_limit <= 0 else sales_files[:file_limit]
+
+    return selected_files, file_limit
+
+
+def _resolve_sales_file_selection(
+    sales_files,
+    max_sales_files,
+    validation_max_sales_files,
+):
+    sales_files = list(sales_files)
+    training_files, training_limit = _limit_sales_files(
+        sales_files,
+        max_sales_files,
+        "MAX_SALES_FILES",
+    )
+    validation_files, validation_limit = _limit_sales_files(
+        training_files,
+        validation_max_sales_files,
+        "VALIDATION_MAX_SALES_FILES",
+    )
+
+    validation_mode = "sample"
+    if validation_limit <= 0 or len(validation_files) >= len(training_files):
+        validation_mode = "full"
+
+    return {
+        "total_files_available": len(sales_files),
+        "training_files": training_files,
+        "training_limit": training_limit,
+        "validation_files": validation_files,
+        "validation_limit": validation_limit,
+        "validation_mode": validation_mode,
+    }
+
+
+def _models_by_forecast_level(results):
+    models_by_level = {
+        "store_level": [],
+        "daily_total": [],
+    }
+
+    for model_name, model_results in results.items():
+        forecast_level = model_results.get("forecast_level")
+        if forecast_level == "daily_total" or model_name in DAILY_TOTAL_MODEL_KEYS:
+            models_by_level["daily_total"].append(model_name)
+        elif forecast_level == "store_level" or model_name in STORE_LEVEL_MODEL_KEYS:
+            models_by_level["store_level"].append(model_name)
+
+    return models_by_level
+
+
+def _select_best_model_by_rmse(results, model_names):
+    best_model_name = None
+    best_rmse = float("inf")
+
+    for model_name in model_names:
+        model_results = results.get(model_name, {})
+        metrics = model_results.get("metrics", {})
+        rmse = metrics.get("rmse")
+        if rmse is not None and rmse < best_rmse:
+            best_rmse = rmse
+            best_model_name = model_name
+
+    if best_model_name is None:
+        return None, None
+
+    return best_model_name, best_rmse
+
+
+def _evaluate_training_results(training_result):
+    results = training_result["training_results"]
+    models_by_level = _models_by_forecast_level(results)
+
+    best_store_level_model, best_store_level_rmse = _select_best_model_by_rmse(
+        results,
+        models_by_level["store_level"],
+    )
+    best_daily_total_model, best_daily_total_rmse = _select_best_model_by_rmse(
+        results,
+        models_by_level["daily_total"],
+    )
+
+    return {
+        "best_store_level_model": best_store_level_model,
+        "best_store_level_rmse": best_store_level_rmse,
+        "best_daily_total_model": best_daily_total_model,
+        "best_daily_total_rmse": best_daily_total_rmse,
+        "trained_models": list(results.keys()),
+        "models_by_forecast_level": models_by_level,
+        "best_run_id": training_result.get("mlflow_run_id"),
+        # Compatibility key: this means best store-level model.
+        "best_model": best_store_level_model,
+    }
+
+
+def _build_performance_report(
+    training_result,
+    validation_summary,
+    evaluation_result,
+    registration_result=None,
+):
+    results = training_result["training_results"]
+    validation_summary = validation_summary or {}
+    evaluation_result = evaluation_result or {}
+    registration_result = registration_result or {}
+    models_by_level = evaluation_result.get("models_by_forecast_level")
+    if not models_by_level:
+        models_by_level = _models_by_forecast_level(results)
+
+    registered_models_by_level = {
+        level: canonical_model_names(model_names)
+        for level, model_names in models_by_level.items()
+    }
+    best_store_level_model = evaluation_result.get("best_store_level_model")
+    best_daily_total_model = evaluation_result.get("best_daily_total_model")
+
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "data_summary": {
+            "total_rows": validation_summary.get("total_rows", 0),
+            "total_files_available": validation_summary.get("total_files_available", 0),
+            "training_files_selected": validation_summary.get(
+                "total_training_files_selected",
+                0,
+            ),
+            "files_validated": validation_summary.get("total_files_validated", 0),
+            "validation_mode": validation_summary.get("validation_mode", "unknown"),
+            "issues_found": validation_summary.get("issues_found", 0),
+            "issues": validation_summary.get("issues", []),
+        },
+        "store_level_model_performance": {},
+        "daily_total_model_performance": {},
+        "best_store_level_model": {
+            "model_name": best_store_level_model,
+            "registered_model_name": canonical_model_name(best_store_level_model),
+            "rmse": evaluation_result.get("best_store_level_rmse"),
+        },
+        "best_daily_total_model": {
+            "model_name": best_daily_total_model,
+            "registered_model_name": canonical_model_name(best_daily_total_model),
+            "rmse": evaluation_result.get("best_daily_total_rmse"),
+        },
+        "models_by_forecast_level": models_by_level,
+        "registered_models_by_forecast_level": registered_models_by_level,
+        "model_registration": registration_result,
+        "model_performance": {},
+    }
+
+    for model_name, model_results in results.items():
+        metrics = model_results.get("metrics", {})
+        if not metrics:
+            continue
+
+        report["model_performance"][model_name] = metrics
+
+        if model_name in models_by_level["daily_total"]:
+            report["daily_total_model_performance"][model_name] = metrics
+        else:
+            report["store_level_model_performance"][model_name] = metrics
+
+    return report
+
 
 default_args = {
     "owner": "data_science_team",
@@ -53,11 +245,43 @@ def sales_forecast_training():
     @task()
     def validate_data_task(extract_result):
         file_paths = extract_result["file_paths"]
+        sales_files = file_paths["sales"]
+        selection = _resolve_sales_file_selection(
+            sales_files,
+            os.getenv("MAX_SALES_FILES", "0"),
+            os.getenv("VALIDATION_MAX_SALES_FILES", "0"),
+        )
+        training_files = selection["training_files"]
+        validation_files = selection["validation_files"]
 
         total_rows = 0
         issues_found = []
 
-        print(f"Validating {len(file_paths['sales'])} Rossmann sales files...")
+        total_available = selection["total_files_available"]
+        total_training_selected = len(training_files)
+        total_validated = len(validation_files)
+
+        if selection["training_limit"] > 0:
+            print(
+                "Training file cap enabled: "
+                f"using first {total_training_selected} of {total_available} "
+                "sales files."
+            )
+
+        if selection["validation_mode"] == "sample":
+            print(
+                "Sample validation enabled: "
+                f"validating first {total_validated} of "
+                f"{total_training_selected} files."
+            )
+        else:
+            print(
+                "Full validation enabled: "
+                f"validating all {total_validated} selected training files."
+            )
+
+        if not validation_files:
+            issues_found.append("No sales files selected for validation")
 
         required_cols = [
         "date",
@@ -69,7 +293,7 @@ def sales_forecast_training():
         "is_holiday",
         ]
 
-        for i, sales_file in enumerate(file_paths["sales"][:10]):
+        for i, sales_file in enumerate(validation_files):
             df = pd.read_parquet(sales_file)
 
             if i == 0:
@@ -92,7 +316,12 @@ def sales_forecast_training():
                 issues_found.append(f"Negative customer traffic in {sales_file}")
 
         validation_summary = {
-            "total_files_validated": len(file_paths["sales"][:10]),
+            "total_files_available": total_available,
+            "total_training_files_selected": total_training_selected,
+            "total_files_validated": total_validated,
+            "validation_mode": selection["validation_mode"],
+            "max_sales_files": selection["training_limit"],
+            "validation_max_sales_files": selection["validation_limit"],
             "total_rows": total_rows,
             "issues_found": len(issues_found),
             "issues": issues_found[:5],
@@ -117,8 +346,22 @@ def sales_forecast_training():
 
         sales_files = file_paths["sales"]
 
-        max_files = int(os.getenv("MAX_SALES_FILES", "0"))
-        selected_files = sales_files if max_files <= 0 else sales_files[:max_files]
+        selected_files, max_files = _limit_sales_files(
+            sales_files,
+            os.getenv("MAX_SALES_FILES", "0"),
+            "MAX_SALES_FILES",
+        )
+        if max_files > 0:
+            print(
+                "Training file cap enabled: "
+                f"loading first {len(selected_files)} of {len(sales_files)} "
+                "sales files."
+            )
+        else:
+            print(f"Training on all {len(selected_files)} sales files.")
+
+        if not selected_files:
+            raise ValueError("No sales files selected for training")
 
         sales_dfs = []
 
@@ -217,7 +460,18 @@ def sales_forecast_training():
 
         for model_name, model_results in results.items():
             serializable_results[model_name] = {
-                "metrics": model_results.get("metrics", {})
+                "metrics": model_results.get("metrics", {}),
+                "forecast_level": model_results.get("forecast_level", "store_level"),
+                "target_grain": model_results.get("target_grain", "date+store_id"),
+                "included_in_store_ensemble": model_results.get(
+                    "included_in_store_ensemble",
+                    model_name == "ensemble_store_level",
+                ),
+                "ensemble_members": model_results.get("ensemble_members", []),
+                "mlflow_artifact_path": model_results.get(
+                    "mlflow_artifact_path",
+                    model_name,
+                ),
             }
 
         current_run_id = getattr(trainer, "last_run_id", None)
@@ -229,85 +483,240 @@ def sales_forecast_training():
     
     @task()
     def evaluate_models_task(training_result):
-        results = training_result["training_results"]
-        best_model_name = None
-        best_rmse = float("inf")
-        for model_name, model_results in results.items():
-            if "metrics" in model_results and "rmse" in model_results["metrics"]:
-                if model_results["metrics"]["rmse"] < best_rmse:
-                    best_rmse = model_results["metrics"]["rmse"]
-                    best_model_name = model_name
-        print(f"Best model: {best_model_name} with RMSE: {best_rmse:.4f}")
-        return {
-            "best_model": best_model_name,
-            "best_run_id": training_result.get("mlflow_run_id"),
-            "trained_models": list(results.keys()),
-        }
+        evaluation = _evaluate_training_results(training_result)
+
+        if evaluation["best_store_level_model"]:
+            print(
+                "Best store-level model: "
+                f"{evaluation['best_store_level_model']} "
+                f"with RMSE: {evaluation['best_store_level_rmse']:.4f}"
+            )
+        else:
+            print("No store-level model RMSE was available")
+
+        if evaluation["best_daily_total_model"]:
+            print(
+                "Daily-total Prophet baseline: "
+                f"{evaluation['best_daily_total_model']} "
+                f"with RMSE: {evaluation['best_daily_total_rmse']:.4f}"
+            )
+        else:
+            print("No daily-total model RMSE was available")
+
+        return evaluation
     
     @task()
-    def register_best_model_task(evaluation_result):
+    def register_trained_models_task(training_result, evaluation_result):
+        """Register all valid trained models and tag best-model metadata."""
         from utils.mlflow_utils import MLflowManager
 
-        run_id = evaluation_result["best_run_id"]
-        trained_models = set(evaluation_result.get("trained_models", []))
-        mlflow_manager = MLflowManager()
-        model_versions = {}
-        for model_name in ["xgboost", "lightgbm", "prophet", "ensemble"]:
-            if model_name not in trained_models:
-                print(f"Skipping {model_name}; it was not trained in this run")
-                continue
-            version = mlflow_manager.register_model(run_id, model_name, model_name)
-            model_versions[model_name] = version
-            print(f"Registered {model_name} version: {version}")
-        return model_versions
-    
-    
-    @task()
-    def transition_to_production_task(model_versions):
-        from utils.mlflow_utils import MLflowManager
+        run_id = evaluation_result.get("best_run_id") or training_result.get("mlflow_run_id")
+        if not run_id:
+            raise ValueError("Cannot register models without an MLflow run ID")
+
+        training_results = training_result.get("training_results", {})
+        trained_models = evaluation_result.get("trained_models") or list(training_results.keys())
+        models_by_level = evaluation_result.get("models_by_forecast_level")
+        if not models_by_level:
+            models_by_level = _models_by_forecast_level(training_results)
+
+        best_store_level_model = canonical_model_name(
+            evaluation_result.get("best_store_level_model")
+        )
+        best_daily_total_model = canonical_model_name(
+            evaluation_result.get("best_daily_total_model")
+        )
 
         mlflow_manager = MLflowManager()
-        for model_name, version in model_versions.items():
-            mlflow_manager.transition_model_stage(model_name, version, "Production")
-            print(f"Transitioned {model_name} v{version} to Production")
-        return "Models transitioned to production"
 
-
-    @task()
-    def generate_performance_report_task(training_result, validation_summary):
-        results = training_result["training_results"]
-        report = {
-            "timestamp": datetime.now().isoformat(),
-            "data_summary": {
-                "total_rows": (
-                    validation_summary.get("total_rows", 0) if validation_summary else 0
+        store_level_models = canonical_model_names(
+            models_by_level.get("store_level", [])
+        )
+        daily_total_models = canonical_model_names(
+            models_by_level.get("daily_total", [])
+        )
+        mlflow_manager.set_run_tags(
+            run_id,
+            {
+                "best_store_level_model": best_store_level_model,
+                "best_store_level_rmse": evaluation_result.get(
+                    "best_store_level_rmse"
                 ),
-                "files_validated": (
-                    validation_summary.get("total_files_validated", 0)
-                    if validation_summary
-                    else 0
+                "best_daily_total_model": best_daily_total_model,
+                "best_daily_total_rmse": evaluation_result.get(
+                    "best_daily_total_rmse"
                 ),
-                "issues_found": (
-                    validation_summary.get("issues_found", 0)
-                    if validation_summary
-                    else 0
-                ),
-                "issues": (
-                    validation_summary.get("issues", []) if validation_summary else []
-                ),
+                "store_level_models": store_level_models,
+                "daily_total_models": daily_total_models,
             },
-            "model_performance": {},
+        )
+
+        registered_versions = {}
+        skipped_models = {}
+        seen_registered_models = set()
+        production_models = []
+        staging_models = []
+
+        for model_key in trained_models:
+            model_results = training_results.get(model_key, {})
+            registry_entry = get_model_registry_entry(model_key, model_results)
+            if not registry_entry:
+                skipped_models[model_key] = "no registry mapping"
+                print(f"Skipping {model_key}; no registry mapping is defined")
+                continue
+
+            registered_name = registry_entry["registered_name"]
+            if registered_name in seen_registered_models:
+                skipped_models[model_key] = (
+                    f"duplicate registration target {registered_name}"
+                )
+                print(
+                    f"Skipping {model_key}; {registered_name} was already registered"
+                )
+                continue
+
+            seen_registered_models.add(registered_name)
+            artifact_path = registry_entry["artifact_path"]
+            version = mlflow_manager.register_model(
+                run_id,
+                registered_name,
+                artifact_path,
+            )
+
+            forecast_level = registry_entry.get("forecast_level")
+            is_best_store_level = registered_name == best_store_level_model
+            is_best_daily_total = registered_name == best_daily_total_model
+
+            # Cleaner MLOps behavior: only the best model for each forecast
+            # level is Production; other store-level candidates stay in Staging.
+            recommended_stage = None
+            if is_best_store_level or is_best_daily_total:
+                recommended_stage = "Production"
+                production_models.append(registered_name)
+            elif forecast_level == "store_level":
+                recommended_stage = "Staging"
+                staging_models.append(registered_name)
+
+            version_tags = {
+                "forecast_level": forecast_level,
+                "target_grain": registry_entry.get("target_grain"),
+                "is_best_store_level": is_best_store_level,
+                "is_best_daily_total": is_best_daily_total,
+                "source_result_key": model_key,
+                "artifact_path": artifact_path,
+            }
+            if registry_entry.get("ensemble_members"):
+                version_tags["ensemble_members"] = registry_entry["ensemble_members"]
+
+            try:
+                mlflow_manager.set_model_version_tags(
+                    registered_name,
+                    version,
+                    version_tags,
+                )
+            except Exception as tag_error:
+                print(
+                    "Warning: failed to tag registered model "
+                    f"{registered_name} v{version}: {tag_error}"
+                )
+
+            registered_versions[registered_name] = {
+                "version": version,
+                "result_key": model_key,
+                "artifact_path": artifact_path,
+                "forecast_level": forecast_level,
+                "target_grain": registry_entry.get("target_grain"),
+                "is_best_store_level": is_best_store_level,
+                "is_best_daily_total": is_best_daily_total,
+                "recommended_stage": recommended_stage,
+                "ensemble_members": registry_entry.get("ensemble_members", []),
+            }
+            print(
+                f"Registered {registered_name} v{version} "
+                f"from artifact path {artifact_path}"
+            )
+
+        return {
+            "registered_versions": registered_versions,
+            "best_store_level_model": best_store_level_model,
+            "best_daily_total_model": best_daily_total_model,
+            "production_models": production_models,
+            "staging_models": staging_models,
+            "skipped_models": skipped_models,
         }
-        if results:
-            for model_name, model_results in results.items():
-                if "metrics" in model_results:
-                    report["model_performance"][model_name] = model_results["metrics"]
+    
+    
+    @task()
+    def transition_registered_models_task(registration_result):
+        from utils.mlflow_utils import MLflowManager
+
+        mlflow_manager = MLflowManager()
+        transitioned_versions = {}
+        registered_only_models = []
+
+        for model_name, version_info in registration_result.get(
+            "registered_versions",
+            {},
+        ).items():
+            version = version_info["version"]
+            stage = version_info.get("recommended_stage")
+            if not stage:
+                registered_only_models.append(model_name)
+                print(f"Leaving {model_name} v{version} registered without a stage")
+                continue
+
+            mlflow_manager.transition_model_stage(model_name, version, stage)
+            try:
+                mlflow_manager.set_model_version_tags(
+                    model_name,
+                    version,
+                    {"assigned_stage": stage},
+                )
+            except Exception as tag_error:
+                print(
+                    "Warning: failed to tag assigned stage for "
+                    f"{model_name} v{version}: {tag_error}"
+                )
+            transitioned_versions[model_name] = {
+                "version": version,
+                "stage": stage,
+            }
+            print(f"Transitioned {model_name} v{version} to {stage}")
+
+        return {
+            "transitioned_versions": transitioned_versions,
+            "production_models": registration_result.get("production_models", []),
+            "staging_models": registration_result.get("staging_models", []),
+            "registered_only_models": registered_only_models,
+        }
+
+
+    @task()
+    def generate_performance_report_task(
+        training_result,
+        validation_summary,
+        evaluation_result,
+        registration_result,
+    ):
+        report = _build_performance_report(
+            training_result,
+            validation_summary,
+            evaluation_result,
+            registration_result,
+        )
         import json
 
         with open("/tmp/performance_report.json", "w") as f:
             json.dump(report, f, indent=2)
         print("Performance report generated")
-        print(f"Models trained: {list(report['model_performance'].keys())}")
+        print(
+            "Store-level models: "
+            f"{list(report['store_level_model_performance'].keys())}"
+        )
+        print(
+            "Daily-total models: "
+            f"{list(report['daily_total_model_performance'].keys())}"
+        )
         return report
     cleanup = BashOperator(
     task_id="cleanup",
@@ -318,10 +727,16 @@ def sales_forecast_training():
     validation_summary = validate_data_task(extract_result)
     training_result = train_models_task(extract_result, validation_summary)
     evaluation_result = evaluate_models_task(training_result)
-    model_versions = register_best_model_task(evaluation_result)
-    transition = transition_to_production_task(model_versions)
-    report = generate_performance_report_task(training_result, validation_summary)
+    registration_result = register_trained_models_task(training_result, evaluation_result)
+    transition = transition_registered_models_task(registration_result)
+    report = generate_performance_report_task(
+        training_result,
+        validation_summary,
+        evaluation_result,
+        registration_result,
+    )
 
+    transition >> cleanup
     report >> cleanup
 
 sales_forecast_training()
