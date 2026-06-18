@@ -10,13 +10,19 @@ from utils.model_registry import canonical_model_names, get_model_registry_entry
 
 def test_legacy_training_keys_register_with_explicit_names():
     xgb_entry = get_model_registry_entry("xgboost")
+    xgb_canonical_entry = get_model_registry_entry("xgboost_store_level")
     lgb_entry = get_model_registry_entry("lightgbm")
+    lgb_canonical_entry = get_model_registry_entry("lightgbm_store_level")
     ensemble_entry = get_model_registry_entry("ensemble_store_level")
 
     assert xgb_entry["artifact_path"] == "xgboost"
     assert xgb_entry["registered_name"] == "xgboost_store_level"
+    assert xgb_canonical_entry["artifact_path"] == "xgboost"
+    assert xgb_canonical_entry["registered_name"] == "xgboost_store_level"
     assert lgb_entry["artifact_path"] == "lightgbm"
     assert lgb_entry["registered_name"] == "lightgbm_store_level"
+    assert lgb_canonical_entry["artifact_path"] == "lightgbm"
+    assert lgb_canonical_entry["registered_name"] == "lightgbm_store_level"
     assert ensemble_entry["artifact_path"] == "ensemble"
     assert ensemble_entry["registered_name"] == "ensemble_store_level"
 

@@ -7,7 +7,6 @@ import logging
 import os
 from datetime import datetime
 
-from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import OrdinalEncoder
 
@@ -19,7 +18,6 @@ import mlflow
 
 from utils.mlflow_utils import MLflowManager
 from feature_engineering.feature_pipeline import FeatureEngineer
-from data_validation.validators import DataValidator
 from ml_models.diagnostics import diagnose_model_performance
 from ml_models.ensemble_model import EnsembleModel
 
@@ -35,7 +33,6 @@ class ModelTrainer:
         self.training_config = self.config['training']
         self.mlflow_manager = MLflowManager(config_path)
         self.feature_engineer = FeatureEngineer(config_path)
-        self.data_validator = DataValidator(config_path)
         
         self.models = {}
         self.encoders = {}

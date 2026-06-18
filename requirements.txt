@@ -8,8 +8,6 @@ prophet
 statsmodels
 mlflow
 boto3
-pandera
-category-encoders
 matplotlib
 seaborn
 plotly

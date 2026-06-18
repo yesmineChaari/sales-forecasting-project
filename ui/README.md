@@ -10,7 +10,7 @@ Run the app with:
 streamlit run inference_app.py
 ```
 
-The container entrypoint also starts `inference_app.py` on port `8501`.
+The Astro Compose service starts `inference_app.py` on port `8501`.
 
 ## What The UI Loads
 
@@ -86,16 +86,13 @@ Environment variables used by the UI:
 ```text
 ui/
 |-- inference_app.py
-|-- entrypoint.sh
 |-- pages/
 |   `-- inference.py
 |-- utils/
 |   |-- simple_model_loader.py
 |   |-- simple_predictor.py
-|   |-- production_model_loader.py
 |   `-- ensemble_model_standalone.py
 |-- requirements.txt
 |-- Dockerfile
-|-- Dockerfile.streamlit
 `-- README.md
 ```

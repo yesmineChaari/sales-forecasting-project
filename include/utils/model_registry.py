@@ -14,7 +14,7 @@ MODEL_REGISTRY_MAP: Dict[str, Dict[str, Any]] = {
         "target_grain": "date+store_id",
     },
     "xgboost_store_level": {
-        "artifact_path": "xgboost_store_level",
+        "artifact_path": "xgboost",
         "registered_name": "xgboost_store_level",
         "forecast_level": "store_level",
         "target_grain": "date+store_id",
@@ -26,7 +26,7 @@ MODEL_REGISTRY_MAP: Dict[str, Dict[str, Any]] = {
         "target_grain": "date+store_id",
     },
     "lightgbm_store_level": {
-        "artifact_path": "lightgbm_store_level",
+        "artifact_path": "lightgbm",
         "registered_name": "lightgbm_store_level",
         "forecast_level": "store_level",
         "target_grain": "date+store_id",

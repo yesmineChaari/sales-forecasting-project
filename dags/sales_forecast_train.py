@@ -15,6 +15,13 @@ from utils.model_registry import (
 )
 
 
+STORE_LEVEL_MODEL_SELECTION_KEYS = (
+    "xgboost_store_level",
+    "lightgbm_store_level",
+    "ensemble_store_level",
+)
+DAILY_TOTAL_MODEL_SELECTION_KEYS = ("prophet_daily_total",)
+
 STORE_LEVEL_MODEL_KEYS = {
     "xgboost",
     "xgboost_store_level",
@@ -89,6 +96,104 @@ def _models_by_forecast_level(results):
     return models_by_level
 
 
+def _canonicalize_training_results(results):
+    canonical_results = {}
+
+    for model_key, model_results in results.items():
+        model_results = dict(model_results or {})
+        registry_entry = get_model_registry_entry(model_key, model_results)
+        if not registry_entry:
+            canonical_results[model_key] = model_results
+            continue
+
+        registered_name = registry_entry["registered_name"]
+        model_results["registered_model_name"] = registered_name
+        model_results["source_model_key"] = model_results.get(
+            "source_model_key",
+            model_key,
+        )
+        model_results["mlflow_artifact_path"] = registry_entry["artifact_path"]
+
+        if not model_results.get("forecast_level"):
+            model_results["forecast_level"] = registry_entry.get("forecast_level")
+        if not model_results.get("target_grain"):
+            model_results["target_grain"] = registry_entry.get("target_grain")
+        if registry_entry.get("ensemble_members") and not model_results.get(
+            "ensemble_members"
+        ):
+            model_results["ensemble_members"] = registry_entry["ensemble_members"]
+
+        canonical_results[registered_name] = model_results
+
+    return canonical_results
+
+
+def _build_model_registration_plan(
+    training_results,
+    trained_models=None,
+    best_store_level_model=None,
+    best_daily_total_model=None,
+):
+    canonical_results = _canonicalize_training_results(training_results)
+    model_keys = trained_models or list(canonical_results.keys())
+    best_store_level_model = canonical_model_name(best_store_level_model)
+    best_daily_total_model = canonical_model_name(best_daily_total_model)
+
+    registration_plan = []
+    skipped_models = {}
+    seen_registered_models = set()
+
+    for model_key in model_keys:
+        canonical_key = canonical_model_name(model_key)
+        model_results = (
+            canonical_results.get(model_key)
+            or canonical_results.get(canonical_key)
+            or {}
+        )
+        registry_entry = (
+            get_model_registry_entry(model_key, model_results)
+            or get_model_registry_entry(canonical_key, model_results)
+        )
+        if not registry_entry:
+            skipped_models[model_key] = "no registry mapping"
+            continue
+
+        registered_name = registry_entry["registered_name"]
+        if registered_name in seen_registered_models:
+            skipped_models[model_key] = (
+                f"duplicate registration target {registered_name}"
+            )
+            continue
+
+        seen_registered_models.add(registered_name)
+        is_best_store_level = registered_name == best_store_level_model
+        is_best_daily_total = registered_name == best_daily_total_model
+        forecast_level = registry_entry.get("forecast_level")
+
+        recommended_stage = None
+        if is_best_store_level or is_best_daily_total:
+            recommended_stage = "Production"
+        elif forecast_level == "store_level":
+            recommended_stage = "Staging"
+
+        registration_plan.append(
+            {
+                "source_result_key": model_key,
+                "canonical_result_key": canonical_key,
+                "registered_name": registered_name,
+                "artifact_path": registry_entry["artifact_path"],
+                "forecast_level": forecast_level,
+                "target_grain": registry_entry.get("target_grain"),
+                "is_best_store_level": is_best_store_level,
+                "is_best_daily_total": is_best_daily_total,
+                "recommended_stage": recommended_stage,
+                "ensemble_members": registry_entry.get("ensemble_members", []),
+            }
+        )
+
+    return registration_plan, skipped_models
+
+
 def _select_best_model_by_rmse(results, model_names):
     best_model_name = None
     best_rmse = float("inf")
@@ -108,16 +213,29 @@ def _select_best_model_by_rmse(results, model_names):
 
 
 def _evaluate_training_results(training_result):
-    results = training_result["training_results"]
+    results = _canonicalize_training_results(training_result["training_results"])
     models_by_level = _models_by_forecast_level(results)
+
+    # Keep RMSE comparisons within the same forecast grain. Prophet forecasts
+    # daily total sales, so it must never compete with store-level models.
+    store_level_candidates = [
+        model_name
+        for model_name in STORE_LEVEL_MODEL_SELECTION_KEYS
+        if model_name in results
+    ]
+    daily_total_candidates = [
+        model_name
+        for model_name in DAILY_TOTAL_MODEL_SELECTION_KEYS
+        if model_name in results
+    ]
 
     best_store_level_model, best_store_level_rmse = _select_best_model_by_rmse(
         results,
-        models_by_level["store_level"],
+        store_level_candidates,
     )
     best_daily_total_model, best_daily_total_rmse = _select_best_model_by_rmse(
         results,
-        models_by_level["daily_total"],
+        daily_total_candidates,
     )
 
     return {
@@ -127,6 +245,8 @@ def _evaluate_training_results(training_result):
         "best_daily_total_rmse": best_daily_total_rmse,
         "trained_models": list(results.keys()),
         "models_by_forecast_level": models_by_level,
+        "store_level_selection_candidates": store_level_candidates,
+        "daily_total_selection_candidates": daily_total_candidates,
         "best_run_id": training_result.get("mlflow_run_id"),
         # Compatibility key: this means best store-level model.
         "best_model": best_store_level_model,
@@ -139,7 +259,7 @@ def _build_performance_report(
     evaluation_result,
     registration_result=None,
 ):
-    results = training_result["training_results"]
+    results = _canonicalize_training_results(training_result["training_results"])
     validation_summary = validation_summary or {}
     evaluation_result = evaluation_result or {}
     registration_result = registration_result or {}
@@ -473,11 +593,15 @@ def sales_forecast_training():
                     model_name,
                 ),
             }
+            if model_results.get("legacy_model_key"):
+                serializable_results[model_name]["source_model_key"] = (
+                    model_results["legacy_model_key"]
+                )
 
         current_run_id = getattr(trainer, "last_run_id", None)
 
         return {
-            "training_results": serializable_results,
+            "training_results": _canonicalize_training_results(serializable_results),
             "mlflow_run_id": current_run_id,
         }
     
@@ -514,7 +638,9 @@ def sales_forecast_training():
         if not run_id:
             raise ValueError("Cannot register models without an MLflow run ID")
 
-        training_results = training_result.get("training_results", {})
+        training_results = _canonicalize_training_results(
+            training_result.get("training_results", {})
+        )
         trained_models = evaluation_result.get("trained_models") or list(training_results.keys())
         models_by_level = evaluation_result.get("models_by_forecast_level")
         if not models_by_level:
@@ -548,65 +674,48 @@ def sales_forecast_training():
                 ),
                 "store_level_models": store_level_models,
                 "daily_total_models": daily_total_models,
+                "registered_model_names": canonical_model_names(trained_models),
             },
         )
 
         registered_versions = {}
-        skipped_models = {}
-        seen_registered_models = set()
         production_models = []
         staging_models = []
+        registration_plan, skipped_models = _build_model_registration_plan(
+            training_results,
+            trained_models,
+            best_store_level_model,
+            best_daily_total_model,
+        )
 
-        for model_key in trained_models:
-            model_results = training_results.get(model_key, {})
-            registry_entry = get_model_registry_entry(model_key, model_results)
-            if not registry_entry:
-                skipped_models[model_key] = "no registry mapping"
-                print(f"Skipping {model_key}; no registry mapping is defined")
-                continue
+        for model_key, reason in skipped_models.items():
+            print(f"Skipping {model_key}; {reason}")
 
-            registered_name = registry_entry["registered_name"]
-            if registered_name in seen_registered_models:
-                skipped_models[model_key] = (
-                    f"duplicate registration target {registered_name}"
-                )
-                print(
-                    f"Skipping {model_key}; {registered_name} was already registered"
-                )
-                continue
-
-            seen_registered_models.add(registered_name)
-            artifact_path = registry_entry["artifact_path"]
+        for registration in registration_plan:
+            registered_name = registration["registered_name"]
+            artifact_path = registration["artifact_path"]
             version = mlflow_manager.register_model(
                 run_id,
                 registered_name,
                 artifact_path,
             )
 
-            forecast_level = registry_entry.get("forecast_level")
-            is_best_store_level = registered_name == best_store_level_model
-            is_best_daily_total = registered_name == best_daily_total_model
-
-            # Cleaner MLOps behavior: only the best model for each forecast
-            # level is Production; other store-level candidates stay in Staging.
-            recommended_stage = None
-            if is_best_store_level or is_best_daily_total:
-                recommended_stage = "Production"
+            recommended_stage = registration["recommended_stage"]
+            if recommended_stage == "Production":
                 production_models.append(registered_name)
-            elif forecast_level == "store_level":
-                recommended_stage = "Staging"
+            elif recommended_stage == "Staging":
                 staging_models.append(registered_name)
 
             version_tags = {
-                "forecast_level": forecast_level,
-                "target_grain": registry_entry.get("target_grain"),
-                "is_best_store_level": is_best_store_level,
-                "is_best_daily_total": is_best_daily_total,
-                "source_result_key": model_key,
+                "forecast_level": registration["forecast_level"],
+                "target_grain": registration["target_grain"],
+                "is_best_store_level": registration["is_best_store_level"],
+                "is_best_daily_total": registration["is_best_daily_total"],
+                "source_result_key": registration["source_result_key"],
                 "artifact_path": artifact_path,
             }
-            if registry_entry.get("ensemble_members"):
-                version_tags["ensemble_members"] = registry_entry["ensemble_members"]
+            if registration["ensemble_members"]:
+                version_tags["ensemble_members"] = registration["ensemble_members"]
 
             try:
                 mlflow_manager.set_model_version_tags(
@@ -622,14 +731,14 @@ def sales_forecast_training():
 
             registered_versions[registered_name] = {
                 "version": version,
-                "result_key": model_key,
+                "result_key": registration["source_result_key"],
                 "artifact_path": artifact_path,
-                "forecast_level": forecast_level,
-                "target_grain": registry_entry.get("target_grain"),
-                "is_best_store_level": is_best_store_level,
-                "is_best_daily_total": is_best_daily_total,
+                "forecast_level": registration["forecast_level"],
+                "target_grain": registration["target_grain"],
+                "is_best_store_level": registration["is_best_store_level"],
+                "is_best_daily_total": registration["is_best_daily_total"],
                 "recommended_stage": recommended_stage,
-                "ensemble_members": registry_entry.get("ensemble_members", []),
+                "ensemble_members": registration["ensemble_members"],
             }
             print(
                 f"Registered {registered_name} v{version} "
@@ -640,6 +749,7 @@ def sales_forecast_training():
             "registered_versions": registered_versions,
             "best_store_level_model": best_store_level_model,
             "best_daily_total_model": best_daily_total_model,
+            "registered_model_names": list(registered_versions.keys()),
             "production_models": production_models,
             "staging_models": staging_models,
             "skipped_models": skipped_models,

@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Tuple, Optional
-from datetime import datetime
+from typing import List, Optional
 import holidays
 import yaml
 import logging
@@ -171,9 +170,6 @@ class FeatureEngineer:
         if categorical_cols:
             df = self.create_interaction_features(df, categorical_cols)
         
-        # Skip advanced features for now to reduce complexity
-        # df = self.create_advanced_features(df, target_col, date_col, group_cols)
-        
         # Handle missing values created by lag and rolling features
         df = self.handle_missing_values(df)
         
@@ -193,139 +189,4 @@ class FeatureEngineer:
                     # For other features, use mean
                     df[col] = df[col].fillna(df[col].mean())
         
-        return df
-    
-    def select_features(self, df: pd.DataFrame, target_col: str,
-                       importance_threshold: float = 0.001) -> List[str]:
-        from sklearn.ensemble import RandomForestRegressor
-        from sklearn.preprocessing import LabelEncoder
-        
-        # Prepare data for feature selection
-        X = df.drop(columns=[target_col])
-        y = df[target_col]
-        
-        # Encode categorical variables
-        label_encoders = {}
-        for col in X.select_dtypes(include=['object']).columns:
-            le = LabelEncoder()
-            X[col] = le.fit_transform(X[col].astype(str))
-            label_encoders[col] = le
-        
-        # Train random forest for feature importance
-        rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-        rf.fit(X, y)
-        
-        # Get feature importances
-        feature_importance = pd.DataFrame({
-            'feature': X.columns,
-            'importance': rf.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        # Select features above threshold
-        selected_features = feature_importance[
-            feature_importance['importance'] >= importance_threshold
-        ]['feature'].tolist()
-        
-        logger.info(f"Selected {len(selected_features)} features out of {len(X.columns)}")
-        return selected_features
-    
-    def create_advanced_features(self, df: pd.DataFrame, target_col: str,
-                                date_col: str, group_cols: Optional[List[str]] = None) -> pd.DataFrame:
-        """Create advanced features for better model performance"""
-        df = df.copy()
-        
-        # Exponentially weighted moving averages (more weight on recent data)
-        ewm_spans = [7, 14]  # Reduced spans to avoid overfitting
-        for span in ewm_spans:
-            if group_cols:
-                df[f'{target_col}_ewm_{span}'] = df.groupby(group_cols)[target_col].transform(
-                    lambda x: x.ewm(span=span, adjust=False).mean()
-                )
-            else:
-                df[f'{target_col}_ewm_{span}'] = df[target_col].ewm(span=span, adjust=False).mean()
-        
-        # Trend features
-        if group_cols:
-            # Linear trend within groups
-            df['trend'] = df.groupby(group_cols).cumcount()
-            df['trend_squared'] = df['trend'] ** 2
-        else:
-            df['trend'] = np.arange(len(df))
-            df['trend_squared'] = df['trend'] ** 2
-        
-        # Sales velocity (rate of change)
-        df[f'{target_col}_velocity'] = df[target_col].diff()
-        df[f'{target_col}_acceleration'] = df[f'{target_col}_velocity'].diff()
-        
-        # Ratio features
-        for window in [7, 30]:
-            # Shift first so ratios only compare against past target history.
-            if group_cols:
-                rolling_mean = df.groupby(group_cols)[target_col].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-                )
-            else:
-                rolling_mean = df[target_col].shift(1).rolling(window, min_periods=1).mean()
-            df[f'{target_col}_ratio_to_{window}d_avg'] = df[target_col] / (rolling_mean + 1)
-        
-        # Day of month features
-        df['day_of_month'] = df[date_col].dt.day
-        df['is_month_start'] = (df['day_of_month'] <= 5).astype(int)
-        df['is_month_end'] = (df['day_of_month'] >= 25).astype(int)
-        
-        # Week of month
-        df['week_of_month'] = (df['day_of_month'] - 1) // 7 + 1
-        
-        # Business quarter features
-        df['quarter_progress'] = (df[date_col].dt.month - 1) % 3 + 1
-        df['is_quarter_end'] = (df['quarter_progress'] == 3).astype(int)
-        
-        # Add carefully selected features that improve time series prediction
-        if 'has_promotion' in df.columns and 'is_weekend' in df.columns:
-            # Simple interaction between promotion and weekend
-            df['promotion_weekend'] = df['has_promotion'] * df['is_weekend']
-        
-        # Ratio features that capture relative performance
-        for window in [7, 30]:
-            # Shift first so ratios only compare against past target history.
-            if group_cols:
-                rolling_mean = df.groupby(group_cols)[target_col].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-                )
-            else:
-                rolling_mean = df[target_col].shift(1).rolling(window, min_periods=1).mean()
-            df[f'{target_col}_ratio_to_{window}d'] = df[target_col] / (rolling_mean + 1)
-        
-        # Days since month start (useful for monthly patterns)
-        df['days_since_month_start'] = df['day_of_month']
-        
-        logger.info("Created advanced features")
-        return df
-    
-    def create_target_encoding(self, df: pd.DataFrame, target_col: str, 
-                              categorical_cols: List[str], smoothing: float = 1.0) -> pd.DataFrame:
-        """Create target encoding for categorical variables with smoothing"""
-        df = df.copy()
-        
-        for col in categorical_cols:
-            # Calculate mean target for each category
-            mean_target = df.groupby(col)[target_col].mean()
-            global_mean = df[target_col].mean()
-            
-            # Calculate counts for smoothing
-            counts = df[col].value_counts()
-            
-            # Apply smoothing to prevent overfitting
-            smooth_mean = {}
-            for cat in counts.index:
-                n = counts[cat]
-                smooth_mean[cat] = (n * mean_target[cat] + smoothing * global_mean) / (n + smoothing)
-            
-            # Create new feature
-            df[f'{col}_target_encoded'] = df[col].map(smooth_mean)
-            
-            # Handle unknown categories
-            df[f'{col}_target_encoded'].fillna(global_mean, inplace=True)
-        
-        logger.info(f"Created target encoding for {len(categorical_cols)} categorical features")
         return df
