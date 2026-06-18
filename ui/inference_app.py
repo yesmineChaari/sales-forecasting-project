@@ -53,12 +53,9 @@ with st.sidebar:
     
     if st.button("🔄 Load/Reload Models", type="primary", use_container_width=True):
         with st.spinner("Loading models..."):
-            # Get latest run or use specific run
             run_id = st.session_state.model_loader.get_latest_run()
             if not run_id:
-                # Use known good run ID as fallback
-                run_id = "f4b632f644f742ceab8397bccac14da8"
-                st.info(f"Using fallback run ID: {run_id[:8]}...")
+                st.error("No trained models found in MLflow. Please train a model first.")
             
             if run_id and st.session_state.model_loader.load_models_from_run(run_id):
                 st.session_state.models_loaded = True
