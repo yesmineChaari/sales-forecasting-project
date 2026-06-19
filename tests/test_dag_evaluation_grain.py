@@ -1,80 +1,23 @@
 from pathlib import Path
-import importlib.util
 import sys
-import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "include"))
 
-
-def _load_dag_module():
-    decorators = types.ModuleType("airflow.decorators")
-
-    def dag(*_args, **_kwargs):
-        def decorator(_func):
-            def wrapper(*_call_args, **_call_kwargs):
-                return None
-
-            return wrapper
-
-        return decorator
-
-    def task(*_args, **_kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    decorators.dag = dag
-    decorators.task = task
-
-    airflow = types.ModuleType("airflow")
-    operators = types.ModuleType("airflow.operators")
-    bash = types.ModuleType("airflow.operators.bash")
-
-    class BashOperator:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __rshift__(self, other):
-            return other
-
-    bash.BashOperator = BashOperator
-
-    previous_modules = {
-        name: sys.modules.get(name)
-        for name in [
-            "airflow",
-            "airflow.decorators",
-            "airflow.operators",
-            "airflow.operators.bash",
-        ]
-    }
-
-    sys.modules["airflow"] = airflow
-    sys.modules["airflow.decorators"] = decorators
-    sys.modules["airflow.operators"] = operators
-    sys.modules["airflow.operators.bash"] = bash
-
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "sales_forecast_train_test_module",
-            ROOT / "dags" / "sales_forecast_train.py",
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        for name, previous_module in previous_modules.items():
-            if previous_module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous_module
+from pipeline.model_results import (
+    build_model_registration_plan,
+    canonicalize_training_results,
+    evaluate_training_results,
+    serializable_training_results,
+)
+from pipeline.model_registration import (
+    register_trained_models,
+    transition_registered_models,
+)
 
 
 def test_prophet_daily_total_is_not_compared_with_store_level_rmse():
-    dag_module = _load_dag_module()
     training_result = {
         "training_results": {
             "xgboost": {
@@ -97,7 +40,7 @@ def test_prophet_daily_total_is_not_compared_with_store_level_rmse():
         "mlflow_run_id": "run-1",
     }
 
-    evaluation = dag_module._evaluate_training_results(training_result)
+    evaluation = evaluate_training_results(training_result)
 
     assert evaluation["best_store_level_model"] == "ensemble_store_level"
     assert evaluation["best_store_level_rmse"] == 80.0
@@ -114,7 +57,6 @@ def test_prophet_daily_total_is_not_compared_with_store_level_rmse():
 
 
 def test_prophet_daily_total_is_daily_total_even_without_metadata():
-    dag_module = _load_dag_module()
     training_result = {
         "training_results": {
             "xgboost": {"metrics": {"rmse": 50.0}},
@@ -124,7 +66,7 @@ def test_prophet_daily_total_is_daily_total_even_without_metadata():
         },
     }
 
-    evaluation = dag_module._evaluate_training_results(training_result)
+    evaluation = evaluate_training_results(training_result)
 
     assert evaluation["best_store_level_model"] == "lightgbm_store_level"
     assert evaluation["best_daily_total_model"] == "prophet_daily_total"
@@ -134,8 +76,7 @@ def test_prophet_daily_total_is_daily_total_even_without_metadata():
 
 
 def test_legacy_training_result_keys_are_canonicalized_for_registration():
-    dag_module = _load_dag_module()
-    canonical_results = dag_module._canonicalize_training_results(
+    canonical_results = canonicalize_training_results(
         {
             "xgboost": {"metrics": {"rmse": 100.0}},
             "lightgbm": {"metrics": {"rmse": 90.0}},
@@ -164,8 +105,7 @@ def test_legacy_training_result_keys_are_canonicalized_for_registration():
 
 
 def test_registration_plan_uses_registry_mapping_for_all_models():
-    dag_module = _load_dag_module()
-    plan, skipped = dag_module._build_model_registration_plan(
+    plan, skipped = build_model_registration_plan(
         {
             "xgboost": {"metrics": {"rmse": 100.0}},
             "lightgbm": {"metrics": {"rmse": 90.0}},
@@ -208,3 +148,93 @@ def test_registration_plan_uses_registry_mapping_for_all_models():
     assert plan[2]["recommended_stage"] == "Production"
     assert plan[3]["is_best_daily_total"] is True
     assert plan[3]["recommended_stage"] == "Production"
+
+
+def test_training_results_are_serialized_with_model_metadata():
+    results = serializable_training_results(
+        {
+            "prophet_daily_total": {
+                "metrics": {"rmse": 1.0},
+                "forecast_level": "daily_total",
+                "target_grain": "date",
+                "regressor_columns": ["promo_rate"],
+            }
+        }
+    )
+
+    assert results["prophet_daily_total"]["metrics"] == {"rmse": 1.0}
+    assert results["prophet_daily_total"]["forecast_level"] == "daily_total"
+    assert results["prophet_daily_total"]["target_grain"] == "date"
+    assert results["prophet_daily_total"]["regressor_columns"] == ["promo_rate"]
+    assert (
+        results["prophet_daily_total"]["mlflow_artifact_path"]
+        == "prophet_daily_total"
+    )
+
+
+def test_model_registration_workflow_uses_canonical_names_and_stages():
+    class FakeMLflowManager:
+        def __init__(self):
+            self.run_tags = None
+            self.registered = []
+            self.version_tags = []
+            self.transitions = []
+
+        def set_run_tags(self, run_id, tags):
+            self.run_tags = (run_id, tags)
+
+        def register_model(self, run_id, registered_name, artifact_path):
+            self.registered.append((run_id, registered_name, artifact_path))
+            return len(self.registered)
+
+        def set_model_version_tags(self, model_name, version, tags):
+            self.version_tags.append((model_name, version, tags))
+
+        def transition_model_stage(self, model_name, version, stage):
+            self.transitions.append((model_name, version, stage))
+
+    fake_manager = FakeMLflowManager()
+    registration = register_trained_models(
+        {
+            "training_results": {
+                "xgboost": {"metrics": {"rmse": 10.0}},
+                "prophet_daily_total": {
+                    "forecast_level": "daily_total",
+                    "metrics": {"rmse": 1.0},
+                },
+            },
+            "mlflow_run_id": "run-1",
+        },
+        {
+            "best_run_id": "run-1",
+            "best_store_level_model": "xgboost_store_level",
+            "best_store_level_rmse": 10.0,
+            "best_daily_total_model": "prophet_daily_total",
+            "best_daily_total_rmse": 1.0,
+            "trained_models": ["xgboost_store_level", "prophet_daily_total"],
+        },
+        mlflow_manager=fake_manager,
+    )
+    transition = transition_registered_models(
+        registration,
+        mlflow_manager=fake_manager,
+    )
+
+    assert fake_manager.run_tags[0] == "run-1"
+    assert fake_manager.run_tags[1]["best_store_level_model"] == "xgboost_store_level"
+    assert fake_manager.registered == [
+        ("run-1", "xgboost_store_level", "xgboost"),
+        ("run-1", "prophet_daily_total", "prophet_daily_total"),
+    ]
+    assert registration["production_models"] == [
+        "xgboost_store_level",
+        "prophet_daily_total",
+    ]
+    assert fake_manager.transitions == [
+        ("xgboost_store_level", 1, "Production"),
+        ("prophet_daily_total", 2, "Production"),
+    ]
+    assert transition["production_models"] == [
+        "xgboost_store_level",
+        "prophet_daily_total",
+    ]

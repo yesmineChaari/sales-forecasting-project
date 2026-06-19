@@ -15,7 +15,7 @@ date + store_id -> store sales
 Prophet is handled separately as a daily-total baseline:
 
 ```text
-date -> total daily sales across all stores
+date + aggregate business signals -> total daily sales across all stores
 ```
 
 ## Model Semantics
@@ -25,9 +25,9 @@ date -> total daily sales across all stores
 | XGBoost | date + store_id | store sales | LightGBM, ensemble |
 | LightGBM | date + store_id | store sales | XGBoost, ensemble |
 | Ensemble | date + store_id | store sales | XGBoost, LightGBM |
-| Prophet | date | total daily sales | daily-total baseline only |
+| Prophet | date + aggregate regressors | total daily sales | daily-total baseline only |
 
-Prophet is not part of the store-level ensemble because it forecasts daily total sales, not individual store sales.
+Prophet is not part of the store-level ensemble because it forecasts daily total sales, not individual store sales. Its daily-total frame includes aggregate Rossmann signals such as promotion count/rate, open-store count, school-holiday rate, and state-holiday flags.
 
 ## Pipeline
 

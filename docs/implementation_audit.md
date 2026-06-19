@@ -38,10 +38,10 @@ XGBoost and LightGBM are store-level models. The ensemble is a store-level ensem
 Prophet is trained separately on daily total sales:
 
 ```text
-date -> total sales across all stores
+date + aggregate business signals -> total sales across all stores
 ```
 
-It is logged and registered as `prophet_daily_total`, evaluated only against daily aggregated targets, and excluded from store-level best-model selection and the store-level ensemble.
+It is logged and registered as `prophet_daily_total`, evaluated only against daily aggregated targets, and excluded from store-level best-model selection and the store-level ensemble. Its regressors include promotion count/rate, open-store count, school-holiday rate, and state-holiday flags.
 
 ## Registration Behavior
 

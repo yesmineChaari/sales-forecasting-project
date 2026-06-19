@@ -60,19 +60,28 @@ features:
 validation:
   required_columns:
     - "date"
-    - "sales"
     - "store_id"
+    - "sales"
     - "customer_traffic"
     - "has_promotion"
     - "is_open"
+    - "is_holiday"
 
   data_types:
     date: "datetime64[ns]"
-    sales: "float64"
     store_id: "object"
+    sales: "float64"
     customer_traffic: "float64"
     has_promotion: "int64"
     is_open: "int64"
+    is_holiday: "int64"
+    school_holiday: "int64"
+    state_holiday: "object"
+    store_type: "object"
+    assortment: "object"
+    competition_distance: "float64"
+    promo2: "int64"
+    promo_interval: "object"
 
   value_ranges:
     sales:
@@ -80,6 +89,50 @@ validation:
       max: 10000000
     customer_traffic:
       min: 0
+    competition_distance:
+      min: 0
+    has_promotion:
+      min: 0
+      max: 1
+    is_open:
+      min: 0
+      max: 1
+    is_holiday:
+      min: 0
+      max: 1
+    school_holiday:
+      min: 0
+      max: 1
+    promo2:
+      min: 0
+      max: 1
+
+  non_null_columns:
+    - "date"
+    - "store_id"
+    - "sales"
+    - "customer_traffic"
+    - "has_promotion"
+    - "is_open"
+    - "is_holiday"
+
+  unique_key:
+    - "date"
+    - "store_id"
+
+  binary_columns:
+    - "has_promotion"
+    - "is_open"
+    - "is_holiday"
+    - "school_holiday"
+    - "promo2"
+
+  file_date_column: "date"
+  expected_frequency: "D"
+  max_issue_examples: 25
+  max_outlier_percentage: 10.0
+  warn_on_future_dates: true
+  fail_on_future_dates: false
 
 # Training Configuration
 training:

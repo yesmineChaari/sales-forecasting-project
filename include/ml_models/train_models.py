@@ -12,7 +12,6 @@ from sklearn.preprocessing import OrdinalEncoder
 
 import xgboost as xgb
 import lightgbm as lgb
-from prophet import Prophet
 import optuna
 import mlflow
 
@@ -20,6 +19,11 @@ from utils.mlflow_utils import MLflowManager
 from feature_engineering.feature_pipeline import FeatureEngineer
 from ml_models.diagnostics import diagnose_model_performance
 from ml_models.ensemble_model import EnsembleModel
+from ml_models.prophet_daily_total import (
+    PROPHET_DAILY_TOTAL_REGRESSORS,
+    build_daily_total_frame,
+    build_prophet_daily_total_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,15 +272,7 @@ class ModelTrainer:
     
     def _daily_total_frame(self, df: pd.DataFrame, date_col: str,
                            target_col: str) -> pd.DataFrame:
-        daily_df = df[[date_col, target_col]].dropna().copy()
-        daily_df[date_col] = pd.to_datetime(daily_df[date_col])
-        daily_df = (
-            daily_df.groupby(date_col, as_index=False)[target_col]
-            .sum()
-            .sort_values(date_col)
-            .rename(columns={date_col: 'ds', target_col: 'y'})
-        )
-        return daily_df
+        return build_daily_total_frame(df, date_col=date_col, target_col=target_col)
 
     def train_prophet_daily_total(self, train_df: pd.DataFrame,
                                   val_df: pd.DataFrame,
@@ -309,26 +305,32 @@ class ModelTrainer:
         })
 
         try:
-            model = Prophet(**prophet_params)
+            model = build_prophet_daily_total_model(prophet_params)
             model.fit(daily_train)
         except Exception as e:
             logger.warning("Retrying Prophet daily-total with minimal parameters: %s", e)
-            model = Prophet(
-                yearly_seasonality=True,
-                weekly_seasonality=True,
-                daily_seasonality=False,
-                changepoint_prior_scale=0.05,
-                seasonality_prior_scale=10.0,
-                uncertainty_samples=0,
-                mcmc_samples=0
+            model = build_prophet_daily_total_model(
+                {
+                    "yearly_seasonality": True,
+                    "weekly_seasonality": True,
+                    "daily_seasonality": False,
+                    "changepoint_prior_scale": 0.05,
+                    "seasonality_prior_scale": 10.0,
+                    "uncertainty_samples": 0,
+                    "mcmc_samples": 0,
+                }
             )
-            model.fit(daily_train[['ds', 'y']])
+            model.fit(daily_train)
 
         validation_predictions = None
         if not daily_val.empty:
-            validation_predictions = model.predict(daily_val[['ds']])['yhat'].values
+            validation_predictions = model.predict(
+                daily_val[["ds"] + PROPHET_DAILY_TOTAL_REGRESSORS]
+            )['yhat'].values
 
-        prophet_pred = model.predict(daily_test[['ds']])['yhat'].values
+        prophet_pred = model.predict(
+            daily_test[["ds"] + PROPHET_DAILY_TOTAL_REGRESSORS]
+        )['yhat'].values
         prophet_metrics = self.calculate_metrics(daily_test['y'].values, prophet_pred)
 
         self.models['prophet_daily_total'] = model
@@ -340,6 +342,10 @@ class ModelTrainer:
             'validation_predictions': validation_predictions,
             'actuals': daily_test['y'].values,
             'prediction_dates': daily_test['ds'].dt.strftime('%Y-%m-%d').tolist(),
+            'regressor_columns': PROPHET_DAILY_TOTAL_REGRESSORS,
+            'input_example': daily_test[
+                ["ds"] + PROPHET_DAILY_TOTAL_REGRESSORS
+            ].head(5),
             'forecast_level': 'daily_total',
             'target_grain': 'date',
             'included_in_store_ensemble': False,
@@ -442,6 +448,9 @@ class ModelTrainer:
                         "prophet_daily_total_forecast_level": "daily_total",
                         "prophet_daily_total_target_grain": "date",
                         "prophet_daily_total_model_family": "prophet",
+                        "prophet_daily_total_regressors": ",".join(
+                            prophet_results.get("regressor_columns", [])
+                        ),
                         "prophet_daily_total_comparable_with_store_level_models": "false",
                     })
                     self.mlflow_manager.log_metrics({
@@ -451,11 +460,7 @@ class ModelTrainer:
                     self.mlflow_manager.log_model(
                         prophet_model,
                         "prophet_daily_total",
-                        input_example=pd.DataFrame({
-                            'ds': pd.to_datetime(
-                                prophet_results['prediction_dates'][:5]
-                            )
-                        }),
+                        input_example=prophet_results.get("input_example"),
                     )
 
                     results['prophet_daily_total'] = prophet_results
