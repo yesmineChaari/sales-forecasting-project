@@ -87,6 +87,56 @@ class ModelTrainer:
         logger.info(f"Data split - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
         
         return train_df, val_df, test_df
+
+    def prepare_prophet_data(
+        self,
+        df: pd.DataFrame,
+        target_col: str = 'sales',
+        date_col: str = 'date',
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        logger.info("Preparing full-row data for Prophet daily-total training")
+
+        required_cols = {date_col, target_col}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            raise ValueError(f"Missing required columns for Prophet training: {missing_cols}")
+
+        working_df = df.copy()
+        working_df[date_col] = pd.to_datetime(working_df[date_col], errors="coerce")
+        working_df[target_col] = pd.to_numeric(working_df[target_col], errors="coerce")
+        working_df = working_df.dropna(subset=[date_col, target_col])
+        working_df["_split_date"] = working_df[date_col].dt.normalize()
+
+        unique_dates = pd.Series(working_df["_split_date"].unique()).sort_values()
+        train_size = int(
+            len(unique_dates)
+            * (
+                1
+                - self.training_config['test_size']
+                - self.training_config['validation_size']
+            )
+        )
+        val_size = int(len(unique_dates) * self.training_config['validation_size'])
+
+        train_dates = set(unique_dates.iloc[:train_size])
+        val_dates = set(unique_dates.iloc[train_size:train_size + val_size])
+        test_dates = set(unique_dates.iloc[train_size + val_size:])
+
+        train_df = working_df[working_df["_split_date"].isin(train_dates)].copy()
+        val_df = working_df[working_df["_split_date"].isin(val_dates)].copy()
+        test_df = working_df[working_df["_split_date"].isin(test_dates)].copy()
+
+        for split_df in (train_df, val_df, test_df):
+            split_df.drop(columns=["_split_date"], inplace=True)
+
+        logger.info(
+            "Prophet data split - Train: %s, Val: %s, Test: %s",
+            len(train_df),
+            len(val_df),
+            len(test_df),
+        )
+
+        return train_df, val_df, test_df
     
     def preprocess_features(self, train_df: pd.DataFrame, val_df: pd.DataFrame, 
                     test_df: pd.DataFrame, target_col: str,
@@ -351,9 +401,18 @@ class ModelTrainer:
             'included_in_store_ensemble': False,
         }
     
-    def train_all_models(self, train_df: pd.DataFrame, val_df: pd.DataFrame,
-                        test_df: pd.DataFrame, target_col: str = 'sales',
-                        use_optuna: bool = True) -> Dict[str, Dict[str, Any]]:
+    def train_all_models(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        target_col: str = 'sales',
+        use_optuna: bool = True,
+        prophet_train_df: Optional[pd.DataFrame] = None,
+        prophet_val_df: Optional[pd.DataFrame] = None,
+        prophet_test_df: Optional[pd.DataFrame] = None,
+        prophet_uses_full_row_input: bool = False,
+    ) -> Dict[str, Dict[str, Any]]:
         
         results = {}
         
@@ -375,12 +434,23 @@ class ModelTrainer:
             )
             
             # Log data stats
-            self.mlflow_manager.log_params({
+            training_params = {
                 "train_size": len(train_df),
                 "val_size": len(val_df),
                 "test_size": len(test_df),
                 "n_features": X_train.shape[1]
-            })
+            }
+            if prophet_train_df is not None and prophet_test_df is not None:
+                training_params.update(
+                    {
+                        "prophet_train_size": len(prophet_train_df),
+                        "prophet_val_size": len(prophet_val_df)
+                        if prophet_val_df is not None
+                        else 0,
+                        "prophet_test_size": len(prophet_test_df),
+                    }
+                )
+            self.mlflow_manager.log_params(training_params)
             
             # Train XGBoost
             xgb_model = self.train_xgboost(X_train, y_train, X_val, y_val, use_optuna)
@@ -435,10 +505,24 @@ class ModelTrainer:
             
             if prophet_enabled:
                 try:
+                    prophet_uses_separate_data = (
+                        prophet_train_df is not None
+                        and prophet_val_df is not None
+                        and prophet_test_df is not None
+                    )
+                    prophet_train_input = (
+                        prophet_train_df if prophet_uses_separate_data else train_df
+                    )
+                    prophet_val_input = (
+                        prophet_val_df if prophet_uses_separate_data else val_df
+                    )
+                    prophet_test_input = (
+                        prophet_test_df if prophet_uses_separate_data else test_df
+                    )
                     prophet_results = self.train_prophet_daily_total(
-                        train_df,
-                        val_df,
-                        test_df,
+                        prophet_train_input,
+                        prophet_val_input,
+                        prophet_test_input,
                         target_col=target_col,
                     )
                     prophet_model = prophet_results['model']
@@ -452,6 +536,9 @@ class ModelTrainer:
                             prophet_results.get("regressor_columns", [])
                         ),
                         "prophet_daily_total_comparable_with_store_level_models": "false",
+                        "prophet_daily_total_uses_full_row_input": str(
+                            prophet_uses_full_row_input
+                        ).lower(),
                     })
                     self.mlflow_manager.log_metrics({
                         f"prophet_daily_total_{k}": v

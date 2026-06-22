@@ -139,8 +139,41 @@ def sales_forecast_training():
             raise ValueError("No sales files selected for training")
 
         store_daily_sales = build_store_daily_training_data(selected_files)
+        prophet_sales_files = file_paths.get("prophet_sales", [])
+        prophet_uses_full_row_input = bool(prophet_sales_files)
+        if prophet_sales_files:
+            prophet_selected_files, prophet_max_files = _limit_sales_files(
+                prophet_sales_files,
+                os.getenv("MAX_SALES_FILES", "0"),
+                "MAX_SALES_FILES",
+            )
+            if prophet_max_files > 0:
+                print(
+                    "Prophet file cap enabled: "
+                    f"loading first {len(prophet_selected_files)} of "
+                    f"{len(prophet_sales_files)} full-row sales files."
+                )
+            else:
+                print(
+                    f"Prophet training on all {len(prophet_selected_files)} "
+                    "full-row sales files."
+                )
+        else:
+            print(
+                "No Prophet-specific full-row sales files found; "
+                "falling back to store-level sales files."
+            )
+            prophet_selected_files = selected_files
+
+        prophet_store_daily_sales = build_store_daily_training_data(
+            prophet_selected_files,
+        )
 
         print(f"Final Rossmann training data shape: {store_daily_sales.shape}")
+        print(
+            "Final Prophet full-row training data shape: "
+            f"{prophet_store_daily_sales.shape}"
+        )
         print(f"Final columns: {store_daily_sales.columns.tolist()}")
 
         trainer = ModelTrainer()
@@ -153,6 +186,11 @@ def sales_forecast_training():
             date_col="date",
             group_cols=["store_id"],
             categorical_cols=categorical_cols,
+        )
+        prophet_train_df, prophet_val_df, prophet_test_df = trainer.prepare_prophet_data(
+            prophet_store_daily_sales,
+            target_col="sales",
+            date_col="date",
         )
 
         print(
@@ -168,6 +206,10 @@ def sales_forecast_training():
             test_df,
             target_col="sales",
             use_optuna=False,
+            prophet_train_df=prophet_train_df,
+            prophet_val_df=prophet_val_df,
+            prophet_test_df=prophet_test_df,
+            prophet_uses_full_row_input=prophet_uses_full_row_input,
         )
 
         for model_name, model_results in results.items():

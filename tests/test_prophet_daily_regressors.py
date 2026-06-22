@@ -87,6 +87,44 @@ def test_daily_total_frame_defaults_missing_optional_regressors():
     assert day["state_holiday_flag"] == 0
 
 
+def test_prepare_prophet_data_preserves_zero_and_closed_rows():
+    rows = []
+    for day in pd.date_range("2024-01-01", periods=5, freq="D"):
+        rows.extend(
+            [
+                {
+                    "date": day,
+                    "store_id": "store_0001",
+                    "sales": 100.0,
+                    "is_open": 1,
+                },
+                {
+                    "date": day,
+                    "store_id": "store_0002",
+                    "sales": 0.0,
+                    "is_open": 0,
+                },
+            ]
+        )
+
+    trainer = object.__new__(ModelTrainer)
+    trainer.training_config = {"test_size": 0.2, "validation_size": 0.2}
+
+    train_df, val_df, test_df = trainer.prepare_prophet_data(pd.DataFrame(rows))
+    combined_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
+
+    assert len(combined_df) == len(rows)
+    assert ((combined_df["is_open"] == 0) & (combined_df["sales"] == 0.0)).any()
+
+    train_dates = set(train_df["date"].dt.normalize())
+    val_dates = set(val_df["date"].dt.normalize())
+    test_dates = set(test_df["date"].dt.normalize())
+
+    assert train_dates.isdisjoint(val_dates)
+    assert train_dates.isdisjoint(test_dates)
+    assert val_dates.isdisjoint(test_dates)
+
+
 def test_prophet_daily_total_fit_and_predict_use_regressors():
     class FakeProphet:
         instances = []

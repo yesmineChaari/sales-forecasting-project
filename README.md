@@ -18,6 +18,10 @@ Prophet is handled separately as a daily-total baseline:
 date + aggregate business signals -> total daily sales across all stores
 ```
 
+Prophet uses the full Rossmann row stream, including `Open=0` and `Sales=0`
+rows. Store-level XGBoost, LightGBM, and ensemble training still use the
+filtered open-store positive-sales stream.
+
 ## Model Semantics
 
 | Model | Forecast grain | Target | Compared with |

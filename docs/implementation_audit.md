@@ -41,7 +41,7 @@ Prophet is trained separately on daily total sales:
 date + aggregate business signals -> total sales across all stores
 ```
 
-It is logged and registered as `prophet_daily_total`, evaluated only against daily aggregated targets, and excluded from store-level best-model selection and the store-level ensemble. Its regressors include promotion count/rate, open-store count, school-holiday rate, and state-holiday flags.
+It is logged and registered as `prophet_daily_total`, evaluated only against daily aggregated targets, and excluded from store-level best-model selection and the store-level ensemble. Prophet uses the full Rossmann row stream, including closed-store and zero-sales rows. Its regressors include promotion count/rate, open-store count, school-holiday rate, and state-holiday flags.
 
 ## Registration Behavior
 
