@@ -86,8 +86,6 @@ Environment variables used by the UI:
 ```text
 ui/
 |-- inference_app.py
-|-- pages/
-|   `-- inference.py
 |-- utils/
 |   |-- simple_model_loader.py
 |   |-- simple_predictor.py

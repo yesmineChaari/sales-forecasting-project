@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 # Page config
 st.set_page_config(
     page_title="Sales Forecast Inference",
-    page_icon="🔮",
     layout="wide"
 )
 
@@ -36,22 +35,22 @@ if 'input_data' not in st.session_state:
     st.session_state.input_data = None
 
 # Header
-st.title("🔮 Sales Forecast Inference")
+st.title("Sales Forecast Inference")
 st.markdown("Generate sales predictions using trained ML models")
 
 # Sidebar for model loading
 with st.sidebar:
-    st.header("📦 Model Configuration")
+    st.header("Model Configuration")
     
     if not st.session_state.models_loaded:
-        st.warning("⚠️ No models loaded")
+        st.warning("No models loaded")
     else:
-        st.success("✅ Models loaded")
+        st.success("Models loaded")
         st.info(f"Models: {', '.join(st.session_state.model_loader.models.keys())}")
         if st.session_state.run_id:
             st.caption(f"Run ID: {st.session_state.run_id[:8]}...")
     
-    if st.button("🔄 Load/Reload Models", type="primary", use_container_width=True):
+    if st.button("Load/Reload Models", type="primary", use_container_width=True):
         with st.spinner("Loading models..."):
             run_id = st.session_state.model_loader.get_latest_run()
             if not run_id:
@@ -60,10 +59,10 @@ with st.sidebar:
             if run_id and st.session_state.model_loader.load_models_from_run(run_id):
                 st.session_state.models_loaded = True
                 st.session_state.run_id = run_id
-                st.success("✅ Models loaded!")
+                st.success("Models loaded!")
                 st.rerun()
             else:
-                st.error("❌ Failed to load models")
+                st.error("Failed to load models")
     
     st.markdown("---")
     
@@ -85,7 +84,7 @@ with st.sidebar:
 # Main content
 if st.session_state.models_loaded:
     # Input tabs
-    tab1, tab2, tab3 = st.tabs(["📤 Upload Data", "✏️ Manual Entry", "🎲 Sample Data"])
+    tab1, tab2, tab3 = st.tabs(["Upload Data", "Manual Entry", "Sample Data"])
     
     input_data = None
     
@@ -99,7 +98,7 @@ if st.session_state.models_loaded:
         
         if uploaded_file is not None:
             input_data = pd.read_csv(uploaded_file)
-            st.success(f"✅ Loaded {len(input_data)} records")
+            st.success(f"Loaded {len(input_data)} records")
             
             # Show preview
             with st.expander("Data Preview"):
@@ -148,7 +147,7 @@ if st.session_state.models_loaded:
         if st.button("Use Manual Data", key="manual_btn"):
             input_data = pd.DataFrame(manual_data)
             st.session_state.input_data = input_data
-            st.success("✅ Manual data ready for prediction")
+            st.success("Manual data ready for prediction")
     
     with tab3:
         st.markdown("### Generate Sample Data")
@@ -180,7 +179,7 @@ if st.session_state.models_loaded:
             })
             st.session_state.input_data = input_data
             
-            st.success("✅ Sample data generated")
+            st.success("Sample data generated")
             
             # Show chart
             fig = go.Figure()
@@ -206,12 +205,12 @@ if st.session_state.models_loaded:
     # Prediction section
     if input_data is not None:
         st.markdown("---")
-        st.header("📊 Generate Forecast")
+        st.header("Generate Forecast")
         
         # Center the button with empty columns on sides
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            if st.button("🚀 Run Prediction", type="primary", use_container_width=True, key="run_prediction"):
+            if st.button("Run Prediction", type="primary", use_container_width=True, key="run_prediction"):
                 with st.spinner("Generating forecast..."):
                     # Run prediction
                     results = st.session_state.predictor.predict(
@@ -221,10 +220,10 @@ if st.session_state.models_loaded:
                     )
                     
                     if results['success']:
-                        st.success("✅ Forecast generated successfully!")
+                        st.success("Forecast generated successfully!")
                         
                         # Show metrics
-                        st.markdown("### 📈 Forecast Summary")
+                        st.markdown("### Forecast Summary")
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             st.metric(
@@ -248,7 +247,7 @@ if st.session_state.models_loaded:
                             )
                         
                         # Visualization
-                        st.markdown("### 📊 Forecast Visualization")
+                        st.markdown("### Forecast Visualization")
                         
                         predictions_df = results['predictions']
                         historical_df = input_data.copy()
@@ -305,7 +304,7 @@ if st.session_state.models_loaded:
                         st.plotly_chart(fig, use_container_width=True)
                         
                         # Download section
-                        st.markdown("### 💾 Export Results")
+                        st.markdown("### Export Results")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -315,7 +314,7 @@ if st.session_state.models_loaded:
                             
                             csv = export_df.to_csv(index=False)
                             st.download_button(
-                                label="📥 Download Forecast (CSV)",
+                                label="Download Forecast (CSV)",
                                 data=csv,
                                 file_name=f"sales_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                                 mime="text/csv"
@@ -325,15 +324,15 @@ if st.session_state.models_loaded:
                             st.info("Forecast includes predictions with confidence intervals")
                     
                     else:
-                        st.error(f"❌ Prediction failed: {results['error']}")
+                        st.error(f"Prediction failed: {results['error']}")
 
 else:
     # No models loaded
-    st.warning("⚠️ Please load models using the sidebar before making predictions.")
-    st.info("👈 Click 'Load/Reload Models' in the sidebar to begin")
+    st.warning("Please load models using the sidebar before making predictions.")
+    st.info("Click 'Load/Reload Models' in the sidebar to begin")
     
     # Add helpful information
-    with st.expander("ℹ️ No models found? Here's what to do:", expanded=True):
+    with st.expander("No models found? Here's what to do:", expanded=True):
         st.markdown("""
         ### First Time Setup
         
@@ -345,7 +344,7 @@ else:
         
         2. **Run the Training DAG**:
            - Find `sales_forecast_training` in the DAG list
-           - Click the play button (▶️) to trigger it
+           - Click the play button to trigger it
            - Wait for training to complete (5-10 minutes)
         
         3. **Come back here**:
