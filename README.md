@@ -20,7 +20,8 @@ date + aggregate business signals -> total daily sales across all stores
 
 Prophet uses the full Rossmann row stream, including `Open=0` and `Sales=0`
 rows. Store-level XGBoost, LightGBM, and ensemble training still use the
-filtered open-store positive-sales stream.
+filtered open-store positive-sales stream. Real-data diagnostics selected the
+`prophet_all_regressors` variant for the production daily-total Prophet model.
 
 ## Model Semantics
 
@@ -95,5 +96,6 @@ streamlit run inference_app.py
 Common environment variables:
 
 - `MAX_SALES_FILES`: cap training files; `0` means all files.
+- `PROPHET_MAX_SALES_FILES`: cap Prophet full-row files; `0` means all files.
 - `VALIDATION_MAX_SALES_FILES`: cap validation files from the selected training files; `0` means full validation.
 - `ENABLE_MODEL_VISUALIZATIONS`: set to `true` to generate and log optional model visualizations.

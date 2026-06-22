@@ -12,6 +12,14 @@ PROPHET_DAILY_TOTAL_REGRESSORS = [
     "school_holiday_rate",
     "state_holiday_flag",
 ]
+PROPHET_DAILY_TOTAL_VARIANT = "prophet_all_regressors"
+PROPHET_DAILY_TOTAL_VARIANT_REGRESSORS = {
+    "prophet_univariate": [],
+    "prophet_promo_only": ["promo_store_count", "promo_rate"],
+    "prophet_open_store_only": ["open_store_count"],
+    "prophet_holiday_only": ["school_holiday_rate", "state_holiday_flag"],
+    PROPHET_DAILY_TOTAL_VARIANT: PROPHET_DAILY_TOTAL_REGRESSORS,
+}
 
 NO_STATE_HOLIDAY_VALUES = {"", "0", "0.0", "none", "nan", "nat", "false"}
 
@@ -118,8 +126,18 @@ def build_daily_total_frame(
     return daily_df
 
 
-def build_prophet_daily_total_model(prophet_params):
+def get_prophet_variant_regressors(variant: str = PROPHET_DAILY_TOTAL_VARIANT):
+    if variant not in PROPHET_DAILY_TOTAL_VARIANT_REGRESSORS:
+        valid_variants = ", ".join(sorted(PROPHET_DAILY_TOTAL_VARIANT_REGRESSORS))
+        raise ValueError(
+            f"Unknown Prophet daily-total variant {variant!r}. "
+            f"Valid variants: {valid_variants}"
+        )
+    return list(PROPHET_DAILY_TOTAL_VARIANT_REGRESSORS[variant])
+
+
+def build_prophet_daily_total_model(prophet_params, regressor_cols=None):
     model = Prophet(**prophet_params)
-    for regressor_col in PROPHET_DAILY_TOTAL_REGRESSORS:
+    for regressor_col in regressor_cols or PROPHET_DAILY_TOTAL_REGRESSORS:
         model.add_regressor(regressor_col)
     return model

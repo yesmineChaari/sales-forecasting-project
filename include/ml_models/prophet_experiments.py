@@ -8,6 +8,7 @@ from prophet import Prophet
 
 from ml_models.prophet_daily_total import (
     PROPHET_DAILY_TOTAL_REGRESSORS,
+    PROPHET_DAILY_TOTAL_VARIANT_REGRESSORS,
     build_daily_total_frame,
 )
 
@@ -20,11 +21,8 @@ BASELINE_VARIANTS = {
 }
 
 PROPHET_VARIANTS = {
-    "prophet_univariate": [],
-    "prophet_all_regressors": PROPHET_DAILY_TOTAL_REGRESSORS,
-    "prophet_promo_only": ["promo_store_count", "promo_rate"],
-    "prophet_open_store_only": ["open_store_count"],
-    "prophet_holiday_only": ["school_holiday_rate", "state_holiday_flag"],
+    variant: list(regressors)
+    for variant, regressors in PROPHET_DAILY_TOTAL_VARIANT_REGRESSORS.items()
 }
 
 EVALUATION_SPLITS = ("validation", "test")

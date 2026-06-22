@@ -21,8 +21,10 @@ from ml_models.diagnostics import diagnose_model_performance
 from ml_models.ensemble_model import EnsembleModel
 from ml_models.prophet_daily_total import (
     PROPHET_DAILY_TOTAL_REGRESSORS,
+    PROPHET_DAILY_TOTAL_VARIANT,
     build_daily_total_frame,
     build_prophet_daily_total_model,
+    get_prophet_variant_regressors,
 )
 
 logger = logging.getLogger(__name__)
@@ -347,39 +349,41 @@ class ModelTrainer:
             len(daily_test),
         )
 
-        prophet_params = self.model_config['prophet']['params'].copy()
+        prophet_config = self.model_config['prophet']
+        prophet_variant = prophet_config.get(
+            'selected_variant',
+            PROPHET_DAILY_TOTAL_VARIANT,
+        )
+        regressor_columns = get_prophet_variant_regressors(prophet_variant)
+        prophet_fit_cols = ["ds", "y"] + regressor_columns
+        prophet_predict_cols = ["ds"] + regressor_columns
+
+        logger.info(
+            "Using Prophet daily-total variant %s with regressors: %s",
+            prophet_variant,
+            regressor_columns,
+        )
+
+        prophet_params = prophet_config['params'].copy()
         prophet_params.update({
-            'stan_backend': 'CMDSTANPY',
             'mcmc_samples': 0,
             'uncertainty_samples': 0,
         })
 
-        try:
-            model = build_prophet_daily_total_model(prophet_params)
-            model.fit(daily_train)
-        except Exception as e:
-            logger.warning("Retrying Prophet daily-total with minimal parameters: %s", e)
-            model = build_prophet_daily_total_model(
-                {
-                    "yearly_seasonality": True,
-                    "weekly_seasonality": True,
-                    "daily_seasonality": False,
-                    "changepoint_prior_scale": 0.05,
-                    "seasonality_prior_scale": 10.0,
-                    "uncertainty_samples": 0,
-                    "mcmc_samples": 0,
-                }
-            )
-            model.fit(daily_train)
+        model = build_prophet_daily_total_model(
+            prophet_params,
+            regressor_cols=regressor_columns,
+        )
+        model.fit(daily_train[prophet_fit_cols])
 
         validation_predictions = None
         if not daily_val.empty:
             validation_predictions = model.predict(
-                daily_val[["ds"] + PROPHET_DAILY_TOTAL_REGRESSORS]
+                daily_val[prophet_predict_cols]
             )['yhat'].values
 
         prophet_pred = model.predict(
-            daily_test[["ds"] + PROPHET_DAILY_TOTAL_REGRESSORS]
+            daily_test[prophet_predict_cols]
         )['yhat'].values
         prophet_metrics = self.calculate_metrics(daily_test['y'].values, prophet_pred)
 
@@ -392,9 +396,10 @@ class ModelTrainer:
             'validation_predictions': validation_predictions,
             'actuals': daily_test['y'].values,
             'prediction_dates': daily_test['ds'].dt.strftime('%Y-%m-%d').tolist(),
-            'regressor_columns': PROPHET_DAILY_TOTAL_REGRESSORS,
+            'variant': prophet_variant,
+            'regressor_columns': regressor_columns,
             'input_example': daily_test[
-                ["ds"] + PROPHET_DAILY_TOTAL_REGRESSORS
+                prophet_predict_cols
             ].head(5),
             'forecast_level': 'daily_total',
             'target_grain': 'date',
@@ -532,6 +537,10 @@ class ModelTrainer:
                         "prophet_daily_total_forecast_level": "daily_total",
                         "prophet_daily_total_target_grain": "date",
                         "prophet_daily_total_model_family": "prophet",
+                        "prophet_daily_total_variant": prophet_results.get(
+                            "variant",
+                            PROPHET_DAILY_TOTAL_VARIANT,
+                        ),
                         "prophet_daily_total_regressors": ",".join(
                             prophet_results.get("regressor_columns", [])
                         ),

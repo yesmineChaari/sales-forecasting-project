@@ -13,6 +13,7 @@ from data_validation.validators import (
 )
 from data_preparation.sales_training_data import (
     build_store_daily_training_data,
+    read_sales_parquet_files,
     store_daily_categorical_columns,
 )
 from pipeline.model_results import (
@@ -140,39 +141,36 @@ def sales_forecast_training():
 
         store_daily_sales = build_store_daily_training_data(selected_files)
         prophet_sales_files = file_paths.get("prophet_sales", [])
-        prophet_uses_full_row_input = bool(prophet_sales_files)
-        if prophet_sales_files:
-            prophet_selected_files, prophet_max_files = _limit_sales_files(
-                prophet_sales_files,
-                os.getenv("MAX_SALES_FILES", "0"),
-                "MAX_SALES_FILES",
+        if not prophet_sales_files:
+            raise ValueError(
+                "Prophet full-row sales files were not produced by extraction. "
+                "Rerun extract_data_task with the current RossmannDataLoader."
             )
-            if prophet_max_files > 0:
-                print(
-                    "Prophet file cap enabled: "
-                    f"loading first {len(prophet_selected_files)} of "
-                    f"{len(prophet_sales_files)} full-row sales files."
-                )
-            else:
-                print(
-                    f"Prophet training on all {len(prophet_selected_files)} "
-                    "full-row sales files."
-                )
+
+        prophet_selected_files, prophet_max_files = _limit_sales_files(
+            prophet_sales_files,
+            os.getenv("PROPHET_MAX_SALES_FILES", "0"),
+            "PROPHET_MAX_SALES_FILES",
+        )
+        if prophet_max_files > 0:
+            print(
+                "Prophet file cap enabled: "
+                f"loading first {len(prophet_selected_files)} of "
+                f"{len(prophet_sales_files)} full-row sales files."
+            )
         else:
             print(
-                "No Prophet-specific full-row sales files found; "
-                "falling back to store-level sales files."
+                f"Prophet training on all {len(prophet_selected_files)} "
+                "full-row sales files."
             )
-            prophet_selected_files = selected_files
 
-        prophet_store_daily_sales = build_store_daily_training_data(
-            prophet_selected_files,
-        )
+        prophet_full_sales = read_sales_parquet_files(prophet_selected_files)
+        prophet_uses_full_row_input = True
 
         print(f"Final Rossmann training data shape: {store_daily_sales.shape}")
         print(
-            "Final Prophet full-row training data shape: "
-            f"{prophet_store_daily_sales.shape}"
+            "Final Prophet full-row data shape: "
+            f"{prophet_full_sales.shape}"
         )
         print(f"Final columns: {store_daily_sales.columns.tolist()}")
 
@@ -188,7 +186,7 @@ def sales_forecast_training():
             categorical_cols=categorical_cols,
         )
         prophet_train_df, prophet_val_df, prophet_test_df = trainer.prepare_prophet_data(
-            prophet_store_daily_sales,
+            prophet_full_sales,
             target_col="sales",
             date_col="date",
         )
