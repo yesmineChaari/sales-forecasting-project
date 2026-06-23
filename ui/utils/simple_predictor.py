@@ -9,17 +9,102 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+HISTORICAL_REQUIRED_COLUMNS = [
+    'date',
+    'store_id',
+    'sales',
+    'customer_traffic',
+    'has_promotion',
+    'is_open',
+    'is_holiday',
+    'school_holiday',
+    'state_holiday',
+    'store_type',
+    'assortment',
+    'competition_distance',
+    'promo2',
+    'promo_interval',
+]
+
+FUTURE_REQUIRED_COLUMNS = [
+    col for col in HISTORICAL_REQUIRED_COLUMNS if col != 'sales'
+]
+
+BINARY_COLUMNS = [
+    'has_promotion',
+    'is_open',
+    'is_holiday',
+    'school_holiday',
+    'promo2',
+]
+
+CATEGORICAL_INTERACTION_COLUMNS = [
+    'store_id',
+    'store_type',
+    'assortment',
+    'state_holiday',
+    'promo_interval',
+]
+
 
 class SimplePredictor:
     """Simple predictor that works with SimpleModelLoader"""
     
     def __init__(self, model_loader):
         self.model_loader = model_loader
+
+    def validate_required_columns(self, df: pd.DataFrame, required_columns, label: str):
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            raise ValueError(
+                f"{label} is missing required columns: {', '.join(missing_cols)}"
+            )
+
+    def normalize_business_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+
+        for col in BINARY_COLUMNS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='raise').astype(int)
+                invalid_values = sorted(set(df[col].unique()) - {0, 1})
+                if invalid_values:
+                    raise ValueError(
+                        f"{col} must contain only 0/1 values. "
+                        f"Invalid values: {invalid_values}"
+                    )
+
+        numeric_cols = ['sales', 'customer_traffic', 'competition_distance']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='raise')
+                if (df[col] < 0).any():
+                    raise ValueError(f"{col} cannot be negative")
+
+        for col in CATEGORICAL_INTERACTION_COLUMNS:
+            if col in df.columns:
+                df[col] = df[col].fillna('none').astype(str)
+
+        return df
+
+    def create_interaction_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        categorical_cols = [
+            col for col in CATEGORICAL_INTERACTION_COLUMNS if col in df.columns
+        ]
+
+        for i, col1 in enumerate(categorical_cols):
+            for col2 in categorical_cols[i + 1:]:
+                df[f'{col1}_{col2}_interaction'] = (
+                    df[col1].astype(str) + "_" + df[col2].astype(str)
+                )
+
+        return df
         
     def prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Prepare features for prediction"""
         # Ensure date column is datetime
         df = df.copy()
+        df = self.normalize_business_features(df)
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
             
@@ -39,6 +124,8 @@ class SimplePredictor:
             df['day_cos'] = np.cos(2 * np.pi * df['day'] / 31)
             df['dayofweek_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
             df['dayofweek_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
+
+        df = self.create_interaction_features(df)
             
         # Add lag features if we have sales data
         if 'sales' in df.columns:
@@ -63,22 +150,43 @@ class SimplePredictor:
                     else:
                         df[col] = df[col].fillna(sales_mean)
         
-        # Add default values for features that might be missing
-        if 'quantity_sold' not in df.columns:
-            df['quantity_sold'] = 100  # Default quantity
-        if 'profit' not in df.columns:
-            df['profit'] = 1000  # Default profit
-        if 'has_promotion' not in df.columns:
-            df['has_promotion'] = 0  # No promotion by default
-        if 'customer_traffic' not in df.columns:
-            df['customer_traffic'] = 500  # Default traffic
-        if 'is_holiday' not in df.columns:
-            df['is_holiday'] = 0  # Not holiday by default
-            
         return df
+
+    def encode_categorical_features(self, future_df: pd.DataFrame) -> pd.DataFrame:
+        future_df = future_df.copy()
+
+        if not self.model_loader.encoders:
+            return future_df
+
+        for col, encoder in self.model_loader.encoders.items():
+            if col not in future_df.columns:
+                continue
+
+            try:
+                if hasattr(encoder, "categories_"):
+                    future_df[col] = encoder.transform(
+                        future_df[[col]].astype(str)
+                    ).ravel()
+                elif hasattr(encoder, "classes_"):
+                    class_map = {
+                        value: idx for idx, value in enumerate(encoder.classes_)
+                    }
+                    future_df[col] = (
+                        future_df[col].astype(str).map(class_map).fillna(-1).values
+                    )
+                else:
+                    future_df[col] = encoder.transform(
+                        future_df[[col]].astype(str)
+                    ).ravel()
+            except Exception as e:
+                logger.warning(f"Error encoding {col}: {e}")
+                future_df[col] = -1
+
+        return future_df
     
-    def predict(self, input_data: pd.DataFrame, model_type: str = 'ensemble', 
-                forecast_days: int = 30) -> Dict[str, Any]:
+    def predict(self, input_data: pd.DataFrame, model_type: str = 'ensemble',
+                forecast_days: int = 30,
+                future_features: pd.DataFrame = None) -> Dict[str, Any]:
         """Make predictions"""
         try:
             if not self.model_loader.loaded:
@@ -86,6 +194,27 @@ class SimplePredictor:
                     'success': False,
                     'error': 'Models not loaded'
                 }
+
+            self.validate_required_columns(
+                input_data,
+                HISTORICAL_REQUIRED_COLUMNS,
+                "Historical input data",
+            )
+
+            if future_features is None:
+                return {
+                    'success': False,
+                    'error': (
+                        'Future feature inputs are required. Provide forecast '
+                        'dates and business/store features before prediction.'
+                    )
+                }
+
+            self.validate_required_columns(
+                future_features,
+                FUTURE_REQUIRED_COLUMNS,
+                "Future feature data",
+            )
             
             # Prepare historical data
             historical_df = self.prepare_features(input_data)
@@ -98,11 +227,20 @@ class SimplePredictor:
                 freq='D'
             )
             
-            # Create future dataframe
-            future_df = pd.DataFrame({
-                'date': future_dates,
-                'store_id': input_data['store_id'].iloc[-1] if 'store_id' in input_data.columns else 'store_001'
-            })
+            future_df = future_features.copy()
+            future_df['date'] = pd.to_datetime(future_df['date'])
+            future_df = future_df.sort_values('date').head(forecast_days)
+
+            if len(future_df) != forecast_days:
+                return {
+                    'success': False,
+                    'error': (
+                        f'Future feature data must contain exactly '
+                        f'{forecast_days} rows.'
+                    )
+                }
+
+            future_dates = pd.to_datetime(future_df['date'])
             
             # Prepare features for future dates
             future_df = self.prepare_features(future_df)
@@ -136,52 +274,23 @@ class SimplePredictor:
                         future_df[f'sales_rolling_{window}_max'] = sales_mean
                         future_df[f'sales_rolling_{window}_median'] = sales_mean
             
-            # Handle categorical features (store_id)
-            if 'store_id' in future_df.columns and future_df['store_id'].dtype == 'object':
-                # If we have encoders, use them
-                if self.model_loader.encoders and 'store_id' in self.model_loader.encoders:
-                    try:
-                        encoder = self.model_loader.encoders['store_id']
-                        if hasattr(encoder, "categories_"):
-                            encoded_stores = encoder.transform(
-                                future_df[['store_id']].astype(str)
-                            ).ravel()
-                        elif hasattr(encoder, "classes_"):
-                            class_map = {value: idx for idx, value in enumerate(encoder.classes_)}
-                            encoded_stores = (
-                                future_df['store_id'].astype(str).map(class_map).fillna(-1).values
-                            )
-                        else:
-                            encoded_stores = encoder.transform(
-                                future_df[['store_id']].astype(str)
-                            ).ravel()
-                        future_df['store_id'] = encoded_stores
-                    except Exception as e:
-                        logger.warning(f"Error encoding store_id: {e}")
-                        # Default to numeric encoding
-                        future_df['store_id'] = 1
-                else:
-                    # No encoder, convert to numeric
-                    # Extract numeric part if format is "store_XXX"
-                    if future_df['store_id'].str.contains('store_').any():
-                        future_df['store_id'] = future_df['store_id'].str.extract(r'(\d+)').astype(int)
-                    else:
-                        future_df['store_id'] = 1
+            future_df = self.encode_categorical_features(future_df)
             
             # Select features based on what the model expects
             if self.model_loader.feature_cols:
-                # Use only features that exist in both the data and expected features
-                available_features = [col for col in self.model_loader.feature_cols 
-                                    if col in future_df.columns]
-                if len(available_features) < len(self.model_loader.feature_cols):
-                    # Add missing features with default values
-                    for col in self.model_loader.feature_cols:
-                        if col not in future_df.columns:
-                            # Special handling for categorical encoded features
-                            if col.startswith('store_'):
-                                future_df[col] = 0
-                            else:
-                                future_df[col] = 0
+                missing_features = [
+                    col for col in self.model_loader.feature_cols
+                    if col not in future_df.columns
+                ]
+                if missing_features:
+                    return {
+                        'success': False,
+                        'error': (
+                            'Could not build all model features from the '
+                            'provided inputs. Missing engineered features: '
+                            + ', '.join(missing_features)
+                        )
+                    }
                 X = future_df[self.model_loader.feature_cols].values
             else:
                 # Fallback to basic features (exclude string columns)

@@ -45,15 +45,26 @@ Prophet is not exposed in the UI because it is a daily-total baseline, not a sto
 CSV uploads should include:
 
 - `date`: date column in `YYYY-MM-DD` format
+- `store_id`: store identifier
 - `sales`: historical sales amount
-- `store_id`: optional store identifier
+- `customer_traffic`
+- `has_promotion`
+- `is_open`
+- `is_holiday`
+- `school_holiday`
+- `state_holiday`
+- `store_type`
+- `assortment`
+- `competition_distance`
+- `promo2`
+- `promo_interval`
 
 Example:
 
 ```csv
-date,store_id,sales
-2024-01-01,store_001,5234.50
-2024-01-02,store_001,4892.75
+date,store_id,sales,customer_traffic,has_promotion,is_open,is_holiday,school_holiday,state_holiday,store_type,assortment,competition_distance,promo2,promo_interval
+2024-01-01,store_0001,5234.50,520,1,1,0,0,none,a,a,500,0,none
+2024-01-02,store_0001,4892.75,490,0,1,0,0,none,a,a,500,0,none
 ```
 
 The dashboard is a demo/exploration interface around MLflow artifacts. Production-quality online store-level inference remains out of scope until recent historical sales features are available at prediction time.

@@ -1,5 +1,7 @@
 """Daily-total Prophet helpers with aggregate Rossmann regressors."""
 
+from xml.parsers.expat import model
+
 import numpy as np
 import pandas as pd
 from prophet import Prophet
@@ -138,6 +140,9 @@ def get_prophet_variant_regressors(variant: str = PROPHET_DAILY_TOTAL_VARIANT):
 
 def build_prophet_daily_total_model(prophet_params, regressor_cols=None):
     model = Prophet(**prophet_params)
-    for regressor_col in regressor_cols or PROPHET_DAILY_TOTAL_REGRESSORS:
+    if regressor_cols is None:
+        regressor_cols = PROPHET_DAILY_TOTAL_REGRESSORS
+
+    for regressor_col in regressor_cols:
         model.add_regressor(regressor_col)
     return model
