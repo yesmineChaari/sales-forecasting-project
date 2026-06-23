@@ -1,27 +1,6 @@
 # Rossmann Sales Forecasting MLOps Pipeline
-
-Airflow DAG -> Rossmann data preparation -> validation -> feature engineering -> model training -> MLflow/MinIO tracking -> model registry
-
 ## Overview
-
 This project trains and tracks Rossmann sales forecasting models with Apache Airflow, MLflow, MinIO, and a Streamlit dashboard. The active training DAG is `sales_forecast_training` in `dags/sales_forecast_train.py`.
-
-The main machine-learning grain is:
-
-```text
-date + store_id -> store sales
-```
-
-Prophet is handled separately as a daily-total baseline:
-
-```text
-date + aggregate business signals -> total daily sales across all stores
-```
-
-Prophet uses the full Rossmann row stream, including `Open=0` and `Sales=0`
-rows. Store-level XGBoost, LightGBM, and ensemble training still use the
-filtered open-store positive-sales stream. Real-data diagnostics selected the
-`prophet_all_regressors` variant for the production daily-total Prophet model.
 
 ## Model Semantics
 
@@ -46,6 +25,16 @@ The Airflow DAG:
 6. Logs models and artifacts to MLflow/MinIO.
 7. Registers all trained model artifacts and tags/reports the best store-level model.
 
+```text
+Airflow DAG
+  -> Rossmann data preparation
+  -> validation
+  -> feature engineering
+  -> model training
+  -> MLflow / MinIO tracking
+  -> model registry
+```
+
 ## Model Registry
 
 All valid trained models are registered when available:
@@ -68,6 +57,10 @@ ui/inference_app.py
 ```
 
 The UI reads MLflow run artifacts directly through its local loaders. It does not call a FastAPI endpoint.
+It exposes the store-level XGBoost, LightGBM, and ensemble models, and asks for
+the Rossmann business features needed for historical and forecast-period input.
+Boolean and categorical fields are controlled in the UI instead of free-text
+defaults. `is_holiday` is derived from `state_holiday` and `school_holiday`.
 
 ## Run Locally
 

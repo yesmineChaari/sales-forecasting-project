@@ -37,7 +37,6 @@ VALUE_TO_BINARY_LABEL = {0: "No", 1: "Yes"}
 BINARY_COLUMNS = [
     "has_promotion",
     "is_open",
-    "is_holiday",
     "school_holiday",
     "promo2",
 ]
@@ -71,11 +70,6 @@ def business_column_config(include_sales=True, disable_date=False):
         ),
         "is_open": st.column_config.SelectboxColumn(
             "Open",
-            options=["No", "Yes"],
-            required=True,
-        ),
-        "is_holiday": st.column_config.SelectboxColumn(
-            "Holiday",
             options=["No", "Yes"],
             required=True,
         ),
@@ -147,11 +141,37 @@ def normalize_editor_data(df):
             df[col] = df[col].map(BINARY_LABEL_TO_VALUE).fillna(df[col]).astype(int)
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"])
+    if "state_holiday" in df.columns and "school_holiday" in df.columns:
+        normalized_state_holiday = (
+            df["state_holiday"]
+            .fillna("none")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        no_holiday_values = {"", "0", "0.0", "none", "nan", "nat", "false"}
+        df["is_holiday"] = (
+            (~normalized_state_holiday.isin(no_holiday_values))
+            | (df["school_holiday"] == 1)
+        ).astype(int)
     return df
 
 
 def validate_input_columns(df, required_cols):
     return [col for col in required_cols if col not in df.columns]
+
+
+def validate_single_store(df):
+    if "store_id" not in df.columns:
+        return False
+    return df["store_id"].astype(str).nunique() == 1
+
+
+def single_store_error():
+    st.error(
+        "The UI currently supports one store at a time. "
+        "Please upload data for a single store."
+    )
 
 
 def latest_value(input_data, column, fallback):
@@ -181,7 +201,6 @@ def future_feature_template(input_data, forecast_days):
                 ),
                 "has_promotion": int(latest_value(input_data, "has_promotion", 0)),
                 "is_open": int(latest_value(input_data, "is_open", 1)),
-                "is_holiday": int(latest_value(input_data, "is_holiday", 0)),
                 "school_holiday": int(latest_value(input_data, "school_holiday", 0)),
                 "state_holiday": latest_value(input_data, "state_holiday", "none"),
                 "store_type": latest_value(input_data, "store_type", "a"),
@@ -206,7 +225,6 @@ def base_manual_rows(days=7):
             "customer_traffic": [500] * days,
             "has_promotion": [0] * days,
             "is_open": [1] * days,
-            "is_holiday": [0] * days,
             "school_holiday": [0] * days,
             "state_holiday": ["none"] * days,
             "store_type": ["a"] * days,
@@ -310,8 +328,12 @@ if st.session_state.models_loaded:
             if missing_cols:
                 st.error(f"Missing required columns: {missing_cols}")
                 input_data = None
+            elif not validate_single_store(input_data):
+                single_store_error()
+                input_data = None
             else:
                 input_data = normalize_editor_data(input_data)
+                input_data = input_data.sort_values("date").reset_index(drop=True)
                 st.session_state.input_data = input_data
     
     with tab2:
@@ -332,9 +354,14 @@ if st.session_state.models_loaded:
         
         if st.button("Use Manual Data", key="manual_btn"):
             input_data = normalize_editor_data(edited_manual_data)
-            st.session_state.input_data = input_data
-            st.session_state.manual_editor_data = display_binary_labels(input_data)
-            st.success("Manual data ready for prediction")
+            if not validate_single_store(input_data):
+                single_store_error()
+                input_data = None
+            else:
+                input_data = input_data.sort_values("date").reset_index(drop=True)
+                st.session_state.input_data = input_data
+                st.session_state.manual_editor_data = display_binary_labels(input_data)
+                st.success("Manual data ready for prediction")
     
     with tab3:
         st.markdown("### Generate Sample Data")
@@ -377,7 +404,6 @@ if st.session_state.models_loaded:
             )
             sample_promo2 = binary_select("Promo2", key="sample_promo2")
         with col3:
-            sample_is_holiday = binary_select("Holiday", key="sample_is_holiday")
             sample_school_holiday = binary_select(
                 "School Holiday",
                 key="sample_school_holiday",
@@ -412,7 +438,6 @@ if st.session_state.models_loaded:
                 'customer_traffic': sample_customer_traffic,
                 'has_promotion': sample_has_promotion,
                 'is_open': sample_is_open,
-                'is_holiday': sample_is_holiday,
                 'school_holiday': sample_school_holiday,
                 'state_holiday': sample_state_holiday,
                 'store_type': sample_store_type,
@@ -421,6 +446,7 @@ if st.session_state.models_loaded:
                 'promo2': sample_promo2,
                 'promo_interval': sample_promo_interval,
             })
+            input_data = input_data.sort_values("date").reset_index(drop=True)
             st.session_state.input_data = input_data
             
             st.success("Sample data generated")
@@ -445,6 +471,8 @@ if st.session_state.models_loaded:
     # data available so clicking Run Prediction does not hide the forecast UI.
     if input_data is None and st.session_state.input_data is not None:
         input_data = st.session_state.input_data
+    if input_data is not None:
+        input_data = input_data.sort_values("date").reset_index(drop=True)
     
     # Prediction section
     if input_data is not None:

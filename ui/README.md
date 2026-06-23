@@ -28,7 +28,7 @@ models/lightgbm/lightgbm_model.pkl
 models/ensemble/ensemble_model.pkl
 ```
 
-This UI does not call a FastAPI endpoint. The FastAPI online inference path was removed because store-level lag and rolling features require historical sales context.
+This UI does not call a FastAPI endpoint.
 
 ## Models
 
@@ -42,7 +42,7 @@ Prophet is not exposed in the UI because it is a daily-total baseline, not a sto
 
 ## Input Data
 
-CSV uploads should include:
+CSV uploads should include the same business fields used by the UI forms:
 
 - `date`: date column in `YYYY-MM-DD` format
 - `store_id`: store identifier
@@ -50,7 +50,6 @@ CSV uploads should include:
 - `customer_traffic`
 - `has_promotion`
 - `is_open`
-- `is_holiday`
 - `school_holiday`
 - `state_holiday`
 - `store_type`
@@ -59,15 +58,26 @@ CSV uploads should include:
 - `promo2`
 - `promo_interval`
 
+`is_holiday` is computed automatically from `state_holiday` and
+`school_holiday`.
+The UI supports one store at a time. Uploaded rows are sorted by `date` before
+lag and rolling features are built.
+
+Manual and sample modes expose these fields through typed controls. Boolean
+fields use Yes/No selectors, categorical fields use dropdowns, and numeric
+fields use number inputs. Forecast-period features are entered separately before
+running a prediction.
+
 Example:
 
 ```csv
-date,store_id,sales,customer_traffic,has_promotion,is_open,is_holiday,school_holiday,state_holiday,store_type,assortment,competition_distance,promo2,promo_interval
-2024-01-01,store_0001,5234.50,520,1,1,0,0,none,a,a,500,0,none
-2024-01-02,store_0001,4892.75,490,0,1,0,0,none,a,a,500,0,none
+date,store_id,sales,customer_traffic,has_promotion,is_open,school_holiday,state_holiday,store_type,assortment,competition_distance,promo2,promo_interval
+2024-01-01,store_0001,5234.50,520,1,1,0,none,a,a,500,0,none
+2024-01-02,store_0001,4892.75,490,0,1,0,none,a,a,500,0,none
 ```
 
-The dashboard is a demo/exploration interface around MLflow artifacts. Production-quality online store-level inference remains out of scope until recent historical sales features are available at prediction time.
+The dashboard is an exploration interface around MLflow artifacts and requires
+recent historical sales so lag and rolling features can be built.
 
 ## Local Development
 

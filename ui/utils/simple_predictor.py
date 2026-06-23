@@ -16,7 +16,6 @@ HISTORICAL_REQUIRED_COLUMNS = [
     'customer_traffic',
     'has_promotion',
     'is_open',
-    'is_holiday',
     'school_holiday',
     'state_holiday',
     'store_type',
@@ -33,7 +32,6 @@ FUTURE_REQUIRED_COLUMNS = [
 BINARY_COLUMNS = [
     'has_promotion',
     'is_open',
-    'is_holiday',
     'school_holiday',
     'promo2',
 ]
@@ -60,6 +58,14 @@ class SimplePredictor:
                 f"{label} is missing required columns: {', '.join(missing_cols)}"
             )
 
+    def validate_single_store(self, df: pd.DataFrame):
+        store_count = df['store_id'].astype(str).nunique()
+        if store_count != 1:
+            raise ValueError(
+                "The UI currently supports one store at a time. "
+                "Please upload data for a single store."
+            )
+
     def normalize_business_features(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
 
@@ -84,6 +90,20 @@ class SimplePredictor:
             if col in df.columns:
                 df[col] = df[col].fillna('none').astype(str)
 
+        if 'state_holiday' in df.columns and 'school_holiday' in df.columns:
+            normalized_state_holiday = (
+                df['state_holiday']
+                .fillna('none')
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            no_holiday_values = {"", "0", "0.0", "none", "nan", "nat", "false"}
+            df['is_holiday'] = (
+                (~normalized_state_holiday.isin(no_holiday_values))
+                | (df['school_holiday'] == 1)
+            ).astype(int)
+
         return df
 
     def create_interaction_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -107,6 +127,7 @@ class SimplePredictor:
         df = self.normalize_business_features(df)
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
+            df = df.sort_values('date').reset_index(drop=True)
             
             # Extract time features
             df['year'] = df['date'].dt.year
@@ -200,6 +221,7 @@ class SimplePredictor:
                 HISTORICAL_REQUIRED_COLUMNS,
                 "Historical input data",
             )
+            self.validate_single_store(input_data)
 
             if future_features is None:
                 return {
