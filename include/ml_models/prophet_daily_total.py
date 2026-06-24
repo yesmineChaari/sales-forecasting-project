@@ -1,7 +1,5 @@
 """Daily-total Prophet helpers with aggregate Rossmann regressors."""
 
-from xml.parsers.expat import model
-
 import numpy as np
 import pandas as pd
 from prophet import Prophet

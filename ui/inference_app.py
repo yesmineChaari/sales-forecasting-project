@@ -12,7 +12,11 @@ import sys
 
 # Add paths
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from utils.simple_model_loader import SimpleModelLoader
+from utils.simple_model_loader import (
+    MODEL_ARTIFACTS,
+    SimpleModelLoader,
+    display_model_type,
+)
 from utils.simple_predictor import (
     FUTURE_REQUIRED_COLUMNS,
     HISTORICAL_REQUIRED_COLUMNS,
@@ -262,7 +266,11 @@ with st.sidebar:
         st.warning("No models loaded")
     else:
         st.success("Models loaded")
-        st.info(f"Models: {', '.join(st.session_state.model_loader.models.keys())}")
+        loaded_models = [
+            display_model_type(model_type)
+            for model_type in st.session_state.model_loader.models.keys()
+        ]
+        st.info(f"Models: {', '.join(loaded_models)}")
         if st.session_state.run_id:
             st.caption(f"Run ID: {st.session_state.run_id[:8]}...")
     
@@ -283,10 +291,16 @@ with st.sidebar:
     st.markdown("---")
     
     # Model selection
+    model_options = (
+        st.session_state.model_loader.available_model_types()
+        if st.session_state.models_loaded
+        else list(MODEL_ARTIFACTS.keys())
+    )
     model_type = st.selectbox(
         "Model Type",
-        ["ensemble", "xgboost", "lightgbm"],
-        help="Ensemble combines multiple models"
+        model_options,
+        format_func=display_model_type,
+        help="The calibrated ensemble uses the saved training-time blend"
     )
     
     # Forecast settings
@@ -536,7 +550,7 @@ if st.session_state.models_loaded:
                         with col4:
                             st.metric(
                                 "Model Used",
-                                model_type.upper()
+                                display_model_type(model_type)
                             )
                         
                         # Visualization

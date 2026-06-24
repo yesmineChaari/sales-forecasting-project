@@ -19,7 +19,6 @@ SimplePredictor = ui_simple_predictor.SimplePredictor
 class FakeModelLoader:
     loaded = True
     encoders = None
-    scalers = None
     feature_cols = [
         "year",
         "month",
@@ -144,6 +143,22 @@ def test_prepare_features_sorts_by_date_before_lags():
 
     assert features_df["date"].tolist() == sorted(features_df["date"].tolist())
     assert features_df.loc[1, "sales_lag_1"] == features_df.loc[0, "sales"]
+
+
+def test_prepare_features_rolling_features_use_only_prior_sales():
+    predictor = SimplePredictor(FakeModelLoader())
+    historical_df = _historical_frame().iloc[:3].copy()
+    historical_df["sales"] = [10.0, 20.0, 30.0]
+
+    features_df = predictor.prepare_features(historical_df)
+
+    assert features_df.loc[0, "sales_lag_1"] == 0
+    assert features_df.loc[0, "sales_rolling_3_mean"] == 0
+    assert np.isclose(features_df.loc[2, "sales_rolling_3_mean"], 15.0)
+    assert features_df.loc[2, "sales_rolling_3_min"] == 10.0
+    assert features_df.loc[2, "sales_rolling_3_max"] == 20.0
+    assert np.isclose(features_df.loc[2, "sales_rolling_3_median"], 15.0)
+    assert not np.isclose(features_df.loc[2, "sales_rolling_3_mean"], 20.0)
 
 
 def test_predictor_derives_is_holiday_from_state_and_school_holiday():

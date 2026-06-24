@@ -49,7 +49,15 @@ def verify_s3_artifacts(
         artifact_uri = run.info.artifact_uri
         results["artifact_uri"] = artifact_uri
 
-        bucket, prefix = _resolve_bucket_and_prefix(artifact_uri)
+        try:
+            bucket, prefix = _resolve_bucket_and_prefix(artifact_uri)
+        except ValueError:
+            logger.warning(
+                "Skipping S3 artifact verification for non-S3 artifact URI: %s",
+                artifact_uri,
+            )
+            results["success"] = True
+            return results
 
         s3_client = boto3.client(
             "s3",

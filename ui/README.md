@@ -28,15 +28,21 @@ models/lightgbm/lightgbm_model.pkl
 models/ensemble/ensemble_model.pkl
 ```
 
+Those legacy artifact folders are loaded into the same canonical store-level
+model names used by registration.
+
 This UI does not call a FastAPI endpoint.
 
 ## Models
 
 The UI exposes store-level models only:
 
-- `ensemble`
-- `xgboost`
-- `lightgbm`
+- `ensemble_store_level`
+- `xgboost_store_level`
+- `lightgbm_store_level`
+
+`ensemble_store_level` is the saved training-time ensemble artifact, including
+the calibrated validation R2 weights.
 
 Prophet is not exposed in the UI because it is a daily-total baseline, not a store-level model.
 
@@ -109,8 +115,7 @@ ui/
 |-- inference_app.py
 |-- utils/
 |   |-- simple_model_loader.py
-|   |-- simple_predictor.py
-|   `-- ensemble_model_standalone.py
+|   `-- simple_predictor.py
 |-- requirements.txt
 |-- Dockerfile
 `-- README.md

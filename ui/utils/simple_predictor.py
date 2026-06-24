@@ -154,22 +154,20 @@ class SimplePredictor:
             for lag in [1, 2, 3, 7, 14, 21, 30]:
                 df[f'sales_lag_{lag}'] = df['sales'].shift(lag)
             
-            # Rolling statistics for different windows
+            # Rolling statistics from prior sales only, matching FeatureEngineer.
+            prior_sales = df['sales'].shift(1)
             for window in [3, 7, 14, 21, 30]:
-                df[f'sales_rolling_{window}_mean'] = df['sales'].rolling(window).mean()
-                df[f'sales_rolling_{window}_std'] = df['sales'].rolling(window).std()
-                df[f'sales_rolling_{window}_min'] = df['sales'].rolling(window).min()
-                df[f'sales_rolling_{window}_max'] = df['sales'].rolling(window).max()
-                df[f'sales_rolling_{window}_median'] = df['sales'].rolling(window).median()
+                rolling_sales = prior_sales.rolling(window, min_periods=1)
+                df[f'sales_rolling_{window}_mean'] = rolling_sales.mean()
+                df[f'sales_rolling_{window}_std'] = rolling_sales.std()
+                df[f'sales_rolling_{window}_min'] = rolling_sales.min()
+                df[f'sales_rolling_{window}_max'] = rolling_sales.max()
+                df[f'sales_rolling_{window}_median'] = rolling_sales.median()
             
             # Fill NaN values with appropriate defaults
-            sales_mean = df['sales'].mean()
             for col in df.columns:
                 if 'sales_lag' in col or 'sales_rolling' in col:
-                    if 'std' in col:
-                        df[col] = df[col].fillna(0)
-                    else:
-                        df[col] = df[col].fillna(sales_mean)
+                    df[col] = df[col].fillna(0)
         
         return df
 
@@ -205,11 +203,18 @@ class SimplePredictor:
 
         return future_df
     
-    def predict(self, input_data: pd.DataFrame, model_type: str = 'ensemble',
+    def predict(self, input_data: pd.DataFrame, model_type: str = 'ensemble_store_level',
                 forecast_days: int = 30,
                 future_features: pd.DataFrame = None) -> Dict[str, Any]:
         """Make predictions"""
         try:
+            canonical_model_type = getattr(
+                self.model_loader,
+                "canonical_model_type",
+                lambda value: value,
+            )
+            selected_model_type = canonical_model_type(model_type)
+
             if not self.model_loader.loaded:
                 return {
                     'success': False,
@@ -325,19 +330,12 @@ class SimplePredictor:
                 available_features = [col for col in feature_cols if col in future_df.columns]
                 X = future_df[available_features].values
             
-            # Scale features if scaler is available
-            if self.model_loader.scalers and 'features' in self.model_loader.scalers:
-                try:
-                    X = self.model_loader.scalers['features'].transform(X)
-                except:
-                    logger.warning("Could not apply feature scaling")
-            
             # Make predictions
-            predictions = self.model_loader.predict(X, model_type=model_type)
-            model_predictions = {model_type: predictions}
+            predictions = self.model_loader.predict(X, model_type=selected_model_type)
+            model_predictions = {selected_model_type: predictions}
 
-            if model_type == "ensemble" and hasattr(self.model_loader, "models"):
-                for individual_model in ["xgboost", "lightgbm"]:
+            if selected_model_type == "ensemble_store_level" and hasattr(self.model_loader, "models"):
+                for individual_model in ["xgboost_store_level", "lightgbm_store_level"]:
                     if individual_model in self.model_loader.models:
                         try:
                             model_predictions[individual_model] = self.model_loader.predict(
@@ -348,15 +346,6 @@ class SimplePredictor:
                             logger.warning(
                                 f"Could not generate {individual_model} comparison predictions: {e}"
                             )
-            
-            # Scale predictions back if scaler is available
-            if self.model_loader.scalers and 'target' in self.model_loader.scalers:
-                try:
-                    predictions = self.model_loader.scalers['target'].inverse_transform(
-                        predictions.reshape(-1, 1)
-                    ).flatten()
-                except:
-                    logger.warning("Could not inverse transform predictions")
             
             # Create results dataframe
             results_df = pd.DataFrame({
@@ -379,7 +368,7 @@ class SimplePredictor:
                 'success': True,
                 'predictions': results_df,
                 'summary': summary,
-                'model_type': model_type,
+                'model_type': selected_model_type,
                 'model_predictions': model_predictions
             }
             

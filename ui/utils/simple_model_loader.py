@@ -4,14 +4,110 @@ Simplified model loader for Streamlit UI
 
 import os
 import pickle
+import sys
+import importlib.util
+from pathlib import Path
+
 import joblib
 import mlflow
 import logging
-from typing import Dict, Any, Optional
-import pandas as pd
+from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+INCLUDE_PATH_CANDIDATES = [
+    os.getenv("AIRFLOW_INCLUDE_PATH"),
+    "/usr/local/airflow/include",
+    str(Path(__file__).resolve().parents[2] / "include"),
+]
+
+for include_path in INCLUDE_PATH_CANDIDATES:
+    if include_path and os.path.isdir(include_path) and include_path not in sys.path:
+        sys.path.append(include_path)
+
+STORE_LEVEL_MODEL_TYPES = (
+    "ensemble_store_level",
+    "xgboost_store_level",
+    "lightgbm_store_level",
+)
+
+DEFAULT_MODEL_ARTIFACTS = {
+    "ensemble_store_level": ("ensemble", "ensemble_model.pkl"),
+    "xgboost_store_level": ("xgboost", "xgboost_model.pkl"),
+    "lightgbm_store_level": ("lightgbm", "lightgbm_model.pkl"),
+}
+
+MODEL_ALIASES = {
+    "xgboost": "xgboost_store_level",
+    "lightgbm": "lightgbm_store_level",
+    "ensemble": "ensemble_store_level",
+}
+
+MODEL_DISPLAY_NAMES = {
+    "xgboost_store_level": "XGBoost",
+    "lightgbm_store_level": "LightGBM",
+    "ensemble_store_level": "Calibrated Ensemble",
+}
+
+
+def _load_model_registry_module():
+    for include_path in INCLUDE_PATH_CANDIDATES:
+        if not include_path:
+            continue
+
+        registry_path = Path(include_path) / "utils" / "model_registry.py"
+        if not registry_path.exists():
+            continue
+
+        spec = importlib.util.spec_from_file_location(
+            "sales_forecast_model_registry",
+            registry_path,
+        )
+        registry_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(registry_module)
+        return registry_module
+
+    return None
+
+
+def _model_artifacts_from_registry():
+    registry_module = _load_model_registry_module()
+    if registry_module is None:
+        logger.warning(
+            "Model registry module not found; using default UI artifact mapping"
+        )
+        return DEFAULT_MODEL_ARTIFACTS
+
+    model_artifacts = {}
+    for model_type in STORE_LEVEL_MODEL_TYPES:
+        entry = registry_module.get_model_registry_entry(model_type)
+        if not entry:
+            logger.warning(
+                "Model registry entry missing for %s; using default artifact mapping",
+                model_type,
+            )
+            return DEFAULT_MODEL_ARTIFACTS
+
+        artifact_path = entry["artifact_path"].strip("/")
+        artifact_name = artifact_path.split("/")[-1]
+        model_artifacts[model_type] = (
+            artifact_path,
+            f"{artifact_name}_model.pkl",
+        )
+
+    return model_artifacts
+
+
+MODEL_ARTIFACTS = _model_artifacts_from_registry()
+
+
+def canonical_model_type(model_type: str) -> str:
+    return MODEL_ALIASES.get(model_type, model_type)
+
+
+def display_model_type(model_type: str) -> str:
+    return MODEL_DISPLAY_NAMES.get(canonical_model_type(model_type), model_type)
 
 
 class SimpleModelLoader:
@@ -22,15 +118,49 @@ class SimpleModelLoader:
         mlflow.set_tracking_uri(self.mlflow_uri)
         
         self.models = {}
-        self.scalers = None
         self.encoders = None
         self.feature_cols = None
         self.loaded = False
+
+    @staticmethod
+    def canonical_model_type(model_type: str) -> str:
+        return canonical_model_type(model_type)
+
+    @staticmethod
+    def display_model_type(model_type: str) -> str:
+        return display_model_type(model_type)
+
+    def available_model_types(self):
+        return [
+            model_type
+            for model_type in MODEL_ARTIFACTS
+            if model_type in self.models
+        ]
+
+    def _load_pickle_artifact(self, artifact_path: str, label: str):
+        try:
+            model = joblib.load(artifact_path)
+            logger.info("Loaded %s model", label)
+            return model
+        except Exception as e:
+            logger.warning(
+                "Could not load %s with joblib, trying pickle: %s",
+                label,
+                e,
+            )
+            with open(artifact_path, 'rb') as f:
+                model = pickle.load(f)
+            logger.info("Loaded %s model with pickle", label)
+            return model
         
     def load_models_from_run(self, run_id: str) -> bool:
         """Load models from a specific MLflow run"""
         try:
             logger.info(f"Loading models from run: {run_id}")
+            self.models = {}
+            self.encoders = None
+            self.feature_cols = None
+            self.loaded = False
             
             # Download artifacts
             client = mlflow.tracking.MlflowClient()
@@ -40,18 +170,6 @@ class SimpleModelLoader:
             # Download all artifacts
             artifacts_path = client.download_artifacts(run_id, "", dst_path=local_dir)
             logger.info(f"Downloaded artifacts to: {artifacts_path}")
-            
-            # Load scalers
-            scalers_path = os.path.join(artifacts_path, "scalers.pkl")
-            if os.path.exists(scalers_path):
-                try:
-                    self.scalers = joblib.load(scalers_path)
-                    logger.info("Loaded scalers")
-                except Exception as e:
-                    logger.warning(f"Could not load scalers with joblib, trying pickle: {e}")
-                    with open(scalers_path, 'rb') as f:
-                        self.scalers = pickle.load(f)
-                    logger.info("Loaded scalers with pickle")
             
             # Load encoders
             encoders_path = os.path.join(artifacts_path, "encoders.pkl")
@@ -80,51 +198,27 @@ class SimpleModelLoader:
             # Load models
             models_dir = os.path.join(artifacts_path, "models")
             if os.path.exists(models_dir):
-                # Load XGBoost
-                xgb_path = os.path.join(models_dir, "xgboost", "xgboost_model.pkl")
-                if os.path.exists(xgb_path):
+                for model_type, (artifact_dir, filename) in MODEL_ARTIFACTS.items():
+                    model_path = os.path.join(models_dir, artifact_dir, filename)
+                    if not os.path.exists(model_path):
+                        logger.warning(
+                            "Model artifact missing for %s: %s",
+                            model_type,
+                            model_path,
+                        )
+                        continue
+
                     try:
-                        self.models['xgboost'] = joblib.load(xgb_path)
-                        logger.info("Loaded XGBoost model")
+                        self.models[model_type] = self._load_pickle_artifact(
+                            model_path,
+                            MODEL_DISPLAY_NAMES.get(model_type, model_type),
+                        )
                     except Exception as e:
-                        logger.warning(f"Could not load XGBoost with joblib, trying pickle: {e}")
-                        with open(xgb_path, 'rb') as f:
-                            self.models['xgboost'] = pickle.load(f)
-                        logger.info("Loaded XGBoost model with pickle")
-                
-                # Load LightGBM
-                lgb_path = os.path.join(models_dir, "lightgbm", "lightgbm_model.pkl")
-                if os.path.exists(lgb_path):
-                    try:
-                        self.models['lightgbm'] = joblib.load(lgb_path)
-                        logger.info("Loaded LightGBM model")
-                    except Exception as e:
-                        logger.warning(f"Could not load LightGBM with joblib, trying pickle: {e}")
-                        with open(lgb_path, 'rb') as f:
-                            self.models['lightgbm'] = pickle.load(f)
-                        logger.info("Loaded LightGBM model with pickle")
-                
-                # Load Ensemble
-                ensemble_path = os.path.join(models_dir, "ensemble", "ensemble_model.pkl")
-                if os.path.exists(ensemble_path):
-                    try:
-                        # First try regular loading
-                        self.models['ensemble'] = joblib.load(ensemble_path)
-                        logger.info("Loaded Ensemble model")
-                    except Exception as e:
-                        logger.warning(f"Could not load Ensemble model with joblib: {e}")
-                        # Try to recreate ensemble from loaded models
-                        if 'xgboost' in self.models and 'lightgbm' in self.models:
-                            from .ensemble_model_standalone import EnsembleModel
-                            ensemble_models = {
-                                'xgboost': self.models['xgboost'],
-                                'lightgbm': self.models['lightgbm']
-                            }
-                            ensemble_weights = {'xgboost': 0.5, 'lightgbm': 0.5}
-                            self.models['ensemble'] = EnsembleModel(ensemble_models, ensemble_weights)
-                            logger.info("Created Ensemble model from loaded models")
-                        else:
-                            logger.warning("Not enough models to create ensemble")
+                        logger.error(
+                            "Skipping %s because its saved artifact could not be loaded: %s",
+                            model_type,
+                            e,
+                        )
             
             self.loaded = len(self.models) > 0
             return self.loaded
@@ -157,31 +251,10 @@ class SimpleModelLoader:
             logger.error(f"Error getting latest run: {e}")
             return None
     
-    def predict_ensemble(self, X: np.ndarray) -> np.ndarray:
-        """Make ensemble predictions by averaging available models"""
-        predictions = []
-        
-        if 'xgboost' in self.models:
-            predictions.append(self.models['xgboost'].predict(X))
-            
-        if 'lightgbm' in self.models:
-            predictions.append(self.models['lightgbm'].predict(X))
-        
-        if predictions:
-            return np.mean(predictions, axis=0)
-        else:
-            raise ValueError("No models available for prediction")
-    
-    def predict(self, X: np.ndarray, model_type: str = 'ensemble') -> np.ndarray:
+    def predict(self, X: np.ndarray, model_type: str = 'ensemble_store_level') -> np.ndarray:
         """Make predictions with specified model"""
-        if model_type == 'ensemble':
-            # Check if we have a saved ensemble model
-            if 'ensemble' in self.models:
-                return self.models['ensemble'].predict(X)
-            else:
-                # Fall back to creating ensemble on the fly
-                return self.predict_ensemble(X)
-        elif model_type in self.models:
+        model_type = canonical_model_type(model_type)
+        if model_type in self.models:
             return self.models[model_type].predict(X)
-        else:
-            raise ValueError(f"Model type '{model_type}' not available")
+
+        raise ValueError(f"Model type '{model_type}' not available")
