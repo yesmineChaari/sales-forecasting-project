@@ -92,3 +92,29 @@ Common environment variables:
 - `PROPHET_MAX_SALES_FILES`: cap Prophet full-row files; `0` means all files.
 - `VALIDATION_MAX_SALES_FILES`: cap validation files from the selected training files; `0` means full validation.
 - `ENABLE_MODEL_VISUALIZATIONS`: set to `true` to generate and log optional model visualizations.
+
+## Latest Results
+
+The latest validated training run produced the following test-set results.
+
+### Store-level models
+
+These models forecast sales at the `date + store_id` grain.
+
+| Model | RMSE | MAE | MAPE | R² |
+|---|---:|---:|---:|---:|
+| XGBoost | **785.19** | **565.89** | **8.79%** | **0.9294** |
+| Ensemble | 798.16 | 577.80 | 9.03% | 0.9271 |
+| LightGBM | 836.76 | 606.35 | 9.52% | 0.9198 |
+
+XGBoost achieved the best store-level performance in the latest run, with the lowest RMSE, MAE, and MAPE.
+
+### Daily-total Prophet model
+
+Prophet forecasts aggregate total sales at the `date` grain.
+
+| Model | RMSE | MAE | MAPE | R² |
+|---|---:|---:|---:|---:|
+| Prophet daily-total | 702,433.81 | 529,804.38 | 21.50% | 0.9382 |
+
+Prophet is evaluated separately because it predicts total daily sales across all stores, while XGBoost, LightGBM, and the ensemble predict individual store-level sales.
